@@ -279,6 +279,14 @@ iteration.
 ### OPEN QUESTIONS (consolidated; append-only, never renumbered)
 9. **S0 provisioning.** `lerobot` 0.6.0 is installed with the `dataset` extra; S0 is blocked by the
    `smolvla_base` *checkpoint revision* (pre-processor-format) and needs a fresh download.
+   *Confirmed at the completion check (measured, not inferred):* the cached snapshot for the local
+   `refs/main` revision `5e8d12a` (`snapshot_download(..., local_files_only=True)`) contains exactly
+   `config.json` and `model.safetensors` — no `policy_preprocessor.json`, so LeRobot 0.6.0's processor
+   migration has nothing to read. Fetching a newer revision is *currently impossible on this box*:
+   `model_info('lerobot/smolvla_base')` fails with `ConnectError [WinError 10054]` (the connection is
+   reset by the remote host), so this is not a download we chose not to spend budget on but one the
+   network refuses. Consequence: S0 stays a *non-required* skip and G0 stays uncertified; S3 proves the
+   same weights load through our own adapter. Retry when the Hub is reachable.
 10. **Submodules vs PyPI pins.** `third_party/lerobot` and `third_party/Metaworld` do not exist; the
    versions are pinned in `pyproject.toml` and `env/lock.txt`. Either add the submodules at the
    installed versions or amend `03` §2 — decide before the write-up, since `03` claims submodules.
