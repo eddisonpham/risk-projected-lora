@@ -118,6 +118,39 @@ def test_s2_state_restore_reproduces_twenty_steps(task: MetaWorldTask) -> None:
         env.close()
 
 
+def test_grasp_is_contact_and_force_is_the_largest_pair(task: MetaWorldTask) -> None:
+    """The two read-backs V1/V3/V5 consume, measured on the real model.
+
+    Both are easy to get subtly wrong in ways only the simulator reveals: a distance-only
+    grasp test reports the arm's approach motion as slip (measured: 0.077 m inside a
+    0.06 m ball), and a summed contact force is dominated by whichever stiff pair is
+    meshing, so it *falls* as ``stiff_scale`` rises.
+    """
+    env = task.make_env(DynamicsSpec(), seed=0)
+    expert = task.expert()
+    grasped_steps = 0
+    try:
+        obs, _ = env.reset(seed=0)
+        for _ in range(EXPERT_STEPS):
+            obs, _reward, _terminated, _truncated, info = env.step(expert.act(obs))
+            assert info["grasp_test"] == "contact", (
+                "task_geoms.yaml carries no gripper/object groups, so the grasp test fell back "
+                "to the distance heuristic; V1/V2 would then measure free-space geometry"
+            )
+            pairs = np.asarray(info["force_pairs"], dtype=np.float64)
+            expected = float(pairs.max()) if pairs.size else 0.0
+            assert float(info["force"]) == pytest.approx(expected)
+            assert float(info["force"]) <= float(info["force_sum"]) + 1e-9
+            grasped_steps += int(bool(info["grasped"]))
+    finally:
+        env.close()
+    assert grasped_steps > 0, (
+        "the contact-based grasp test never fired during a nominal expert episode: pads do touch "
+        "the peg (see the pair histogram in configs/env/task_geoms.yaml), so the geom groups or "
+        "the model's contact list are being read wrongly"
+    )
+
+
 def test_contact_read_back_lists_pairs(task: MetaWorldTask) -> None:
     env = task.make_env(DynamicsSpec(), seed=0)
     expert = task.expert()

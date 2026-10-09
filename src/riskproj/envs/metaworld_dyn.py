@@ -14,6 +14,21 @@ runtime with an explicit candidate list* rather than hard-coded:
 
 When a name cannot be resolved we raise with the list of things we tried, so the
 smoke test S1 reports an actionable failure instead of a wrong number.
+
+Two read-backs are defined here because the violation events consume exactly these
+quantities (``04`` §4):
+
+* **grasp** is *contact*, not proximity. The gripper geoms and the manipulated-object
+  geom come from the ``groups`` block of ``configs/env/task_geoms.yaml``, and the object
+  counts as held when one of their contact pairs exists while the gripper is commanded
+  closed. The earlier distance-only test (``||object - eef|| < GRASP_DISTANCE``) counted an
+  object merely *near* the tool centre as held, so V1 measured the arm's approach motion:
+  at nominal dynamics it reported 0.077 m of "slip" inside a 0.06 m ball. ``GRASP_DISTANCE``
+  survives only as a logged fallback for a task whose geometry file carries no groups.
+* **force** is the **per-pair maximum** ``|normal|`` over task-critical contacts, with the
+  per-pair vector and its sum also exposed. The sum is dominated by whichever stiff pair
+  happens to be meshing (it *falls* as ``stiff_scale`` rises, because the contact solves
+  more deeply), which is a property of the solver, not of the manipulation.
 """
 
 from __future__ import annotations
@@ -55,7 +70,10 @@ OBJECT_ATTR_CHAINS: tuple[tuple[str, ...], ...] = (
     ("obj", "position"),
 )
 
-#: Distance below which the object counts as held, together with a closed gripper.
+#: Fallback grasp distance, used only when ``task_geoms.yaml`` has no ``groups`` block:
+#: the object then counts as held when it is this close to the end effector and the
+#: gripper is commanded closed. The primary test is contact between the gripper and
+#: object geom groups (see :meth:`MetaWorldDynEnv._is_grasped`).
 GRASP_DISTANCE = 0.06
 
 
@@ -280,6 +298,10 @@ class MetaWorldDynEnv:
         self._geom_ids_cache: set[int] | None = None
         #: Whether task_geoms.yaml gave us the critical set (vs. "all contacts").
         self._critical_geoms_resolved = False
+        #: Resolved (gripper geoms, object geoms) for the contact grasp test.
+        self._grasp_groups_cache: tuple[set[int], set[int]] | None = None
+        #: Which grasp test actually ran: "contact" or "distance_fallback".
+        self._grasp_test = "unset"
 
         gym, _ = _import_sim()
         # A single task env needs its benchmark's ``rand_vec`` (see build_single_env), so
@@ -381,18 +403,23 @@ class MetaWorldDynEnv:
         raw, reward, terminated, truncated, info = self._env.step(a)
         self._last_raw_obs = np.asarray(raw, dtype=np.float64).reshape(-1)
 
-        force, penetration = self._contact_force_and_penetration()
+        force_pairs, penetration = self._contact_forces_and_penetration()
         eef = self._end_effector_position()
         obj = self._object_position()
         progress_m = self._progress_metres(obj)
         # Kept and exposed: the violated-chunk labeller must consume the same mapping
         # this monitor does, not a re-derivation from the observation (``04`` §4/§6).
+        # ``force`` is the per-pair maximum (the V3/V5 quantity); the vector and its sum
+        # are carried alongside so a reader can see which pair drove a threshold.
         self._last_step_info: dict[str, Any] = {
             "eef_pos": eef,
             "object_pos": obj,
             "grip_offset": obj - eef,
             "grasped": self._is_grasped(eef, obj),
-            "force": force,
+            "grasp_test": self._grasp_test,
+            "force": max(force_pairs) if force_pairs else 0.0,
+            "force_pairs": tuple(force_pairs),
+            "force_sum": float(sum(force_pairs)),
             "penetration": penetration,
             "progress_m": progress_m,
             "object_height": float(obj[2]),
@@ -526,13 +553,17 @@ class MetaWorldDynEnv:
         self._geom_ids_cache = ids
         return ids
 
-    def _contact_force_and_penetration(self) -> tuple[float, float]:
-        """Sum of normal forces and max penetration over task-critical contacts."""
+    def _contact_forces_and_penetration(self) -> tuple[list[float], float]:
+        """Per-pair normal forces and max penetration over task-critical contacts.
+
+        Returns the ``|normal|`` of every task-critical contact pair (the quantity the
+        caller reduces to a per-pair maximum) plus the deepest absolute penetration.
+        """
         import mujoco
 
         data = self._base.data
         critical = self._geom_ids()
-        force = 0.0
+        forces: list[float] = []
         penetration = 0.0
         buf = np.zeros(6, dtype=np.float64)
         for i in range(int(data.ncon)):
@@ -540,10 +571,42 @@ class MetaWorldDynEnv:
             if critical and not ({int(c.geom1), int(c.geom2)} & critical):
                 continue
             mujoco.mj_contactForce(self._base.model, data, i, buf)
-            force += float(abs(buf[0]))
+            forces.append(float(abs(buf[0])))
             if c.dist < 0:
                 penetration = max(penetration, float(-c.dist))
-        return force, penetration
+        return forces, penetration
+
+    def _grasp_geom_groups(self) -> tuple[set[int], set[int]] | None:
+        """``(gripper geoms, object geoms)`` from ``task_geoms.yaml``, or ``None``.
+
+        ``None`` means the geometry file carries no groups (a task that was never
+        discovered), and the caller must fall back to the distance test and say so in
+        ``step_info["grasp_test"]`` rather than silently reporting a weaker grasp.
+        """
+        if self._grasp_groups_cache is not None:
+            return self._grasp_groups_cache
+        from riskproj.envs.dynamics import resolve_geom_ids, task_critical_geoms
+
+        groups = (self.task_geoms or {}).get("groups") or {}
+        if not groups.get("gripper") or not groups.get("object"):
+            # Same fallback as ``_geom_ids``: an env built without the config's task_geoms
+            # (a bare MetaWorldTask in a test) still reads the discovered file, which is
+            # where the gripper/object grouping lives. A missing file means the task was
+            # never discovered, and the caller must then use the distance heuristic.
+            try:
+                groups = task_critical_geoms(self).get("groups") or {}
+            except FileNotFoundError:
+                return None
+        names_gripper = list(groups.get("gripper") or [])
+        names_object = list(groups.get("object") or [])
+        if not names_gripper or not names_object:
+            return None
+        model = self._base.model
+        self._grasp_groups_cache = (
+            set(resolve_geom_ids(model, names_gripper)),
+            set(resolve_geom_ids(model, names_object)),
+        )
+        return self._grasp_groups_cache
 
     def _end_effector_position(self) -> np.ndarray:
         for chain in EEF_ATTR_CHAINS:
@@ -591,14 +654,29 @@ class MetaWorldDynEnv:
         return self._last_progress_m
 
     def _is_grasped(self, eef: np.ndarray, obj: np.ndarray) -> bool:
-        """Heuristic grasp test: gripper commanded closed and object within reach.
+        """Is the manipulated object held? Gripper closed **and in contact** with it.
 
-        Documented rather than assumed ([R]): validate against the task's own
-        success signal during S1 and replace if it disagrees.
+        The contact test is the task's own definition (Meta-World's ``touching_object``
+        asks the same question of the two pad geoms), and it is what V1/V2 require: a
+        distance test measures how far the tool centre is from the object, which during
+        the approach phase is exactly the motion that looked like 0.077 m of slip.
         """
-        return bool(
-            self._last_gripper_cmd > 0 and float(np.linalg.norm(obj - eef)) < GRASP_DISTANCE
-        )
+        if self._last_gripper_cmd <= 0:
+            self._grasp_test = "contact" if self._grasp_groups_cache is not None else "distance_fallback"
+            return False
+        groups = self._grasp_geom_groups()
+        if groups is not None:
+            self._grasp_test = "contact"
+            gripper, target = groups
+            data = self._base.data
+            for i in range(int(data.ncon)):
+                c = data.contact[i]
+                pair = {int(c.geom1), int(c.geom2)}
+                if (pair & gripper) and (pair & target):
+                    return True
+            return False
+        self._grasp_test = "distance_fallback"
+        return float(np.linalg.norm(obj - eef)) < GRASP_DISTANCE
 
     def _obs(self) -> dict[str, Any]:
         if self._last_raw_obs is None:

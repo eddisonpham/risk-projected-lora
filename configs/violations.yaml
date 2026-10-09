@@ -3,20 +3,36 @@
 # `scripts/derive_violation_thresholds.py` (full record: configs/violations_derived.yaml).
 # The toy task carries its own, separately documented spec (envs/toy.py).
 #
-# READ BEFORE USING: the derived values below are the nominal 99.5th percentile x margin,
-# and on peg-insert-side-v3 several of the underlying quantities are *dominated by
-# legitimate manipulation* rather than by failure — the peg slides ~0.12 m in the
-# gripper frame while being inserted, and MuJoCo reports multi-kN normal forces for the
-# peg-aperture contacts at nominal dynamics. Whether V1-V5 remain reachable at all is
-# exactly what G1's violation-coverage criterion measures; if it fails, the event
-# *definitions* (per-pair instead of summed force; drift relative to a held pose instead
-# of the raw gripper offset) must be revised on nominal data before any policy runs.
+# READ BEFORE USING. Two revisions were made after the first G1 sweep, both decided on
+# nominal/expert data only and both recorded in research_log/LOG.md:
+#
+# 1. **Rule: nominal max x margin, not the 99.5th percentile.** The percentile describes
+#    the *step* distribution while V1-V5 are *episode* events; with ~0.5 % of steps above
+#    the bar and dozens of contact-bearing steps per episode, V4 fired in 62 % of nominal
+#    expert episodes. Below, `nominal_peaks` is the peak nominal value actually measured,
+#    and every bar is that peak times a margin, so no nominal episode can cross it.
+# 2. **The quantities themselves changed.** V3/V5 threshold the *largest per-pair* normal
+#    force: the previously derived sum (~3.2 kN) is dominated by whichever stiff pair is
+#    meshing and *falls* as `stiff_scale` rises (measured 974 N at scale 4.0), so a summed
+#    bar is both unreachable and confounded with the axis it was meant to help measure.
+#    `grasped` now means "in contact with the object" (the env's contact test over the
+#    gripper/object geom groups), not "within 6 cm of the tool centre".
+#
+# KNOWN LIMITATION of V1 and V4, to be reported alongside any axis result rather than
+# hidden: on this task both quantities move a long way at nominal dynamics for legitimate
+# reasons. The peg slides ~83 mm in the grasp while being inserted (that slide is how the
+# insertion is achieved), so V1 is an out-of-envelope detector, not a slip-rate detector;
+# and penetration *falls* as the contact stiffens (14.8 mm at stiff_scale 0.25 -> 4.4 mm
+# at 4.0), so V4 fires on softer-than-nominal contacts and is anti-correlated with the
+# stiffness axis. Whether these two remain usable events is what G1's coverage criterion
+# measures; if it fails, the definitions must be revised again (or V1/V4 demoted to
+# diagnostics) before any critic labels are generated.
 violations:
-  slip_drift: 0.12252672357537742 # V1, metres of gripper-frame drift within `window` steps
-  drop_dist: 0.08398810965177543 # V2, metres the object leaves the gripper-frame offset by
-  force_max: 5970.914498238458 # V3, newtons summed over task-critical contact pairs
-  penetration: 0.008040351478902833 # V4, metres of absolute depth (stiffness-independent)
-  jam_force: 5970.914498238458 # V5, newtons sustained without progress
+  slip_drift: 0.12390164022218554 # V1, metres of gripper-frame drift within `window` steps
+  drop_dist: 0.08992630862969109 # V2, metres the object leaves the gripper-frame offset by
+  force_max: 1693.9596917141257 # V3, newtons of the LARGEST per-pair normal force
+  penetration: 0.009168747083243476 # V4, metres of absolute depth (stiffness-independent)
+  jam_force: 1693.9596917141257 # V5, largest per-pair force sustained without progress
   jam_progress_eps: 0.002 # V5, metres of progress that counts as "moving"
   jam_steps: 5 # V5, W consecutive steps
   window: 10 # steps for the V1/V2 windows
@@ -28,10 +44,16 @@ violations:
     source: scripted expert, nominal dynamics, nominal cell ONLY
     n_episodes: 50
     n_steps: 10000
-    percentile: 99.5
+    rule: nominal_max_x_margin
+    nominal_peaks:
+      slip_drift: 0.08260109348145703
+      drop_dist: 0.059950872419794056
+      force_max: 1129.3064611427505
+      penetration: 0.009168747083243476
     margin: { V1: 1.5, V2: 1.5, V3: 1.5, V4: 1.0, V5: 1.5 }
     v4_is_absolute_depth: true
+    v4_note: fires on softer-than-nominal contacts; report it with the axis
     learned_checkpoint_in_loop: false
-    config_hash: 64bb60e1
-    git_sha: dfb725eb07b0b3a839e77d32d953e075c0f428a4
+    config_hash: d6d43ae4
+    git_sha: 689e5ef1c430eacb5f3b1b15e50188f0c64a5e6b
     derived_on: "2026-10-09 (before any learned policy was evaluated on this task)"

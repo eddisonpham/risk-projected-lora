@@ -147,10 +147,17 @@ def test_v3_over_force() -> None:
     assert fired(mon.observe(info(force=8.1)), "V3")
 
 
-def test_v3_sums_per_pair_forces() -> None:
+def test_v3_takes_the_largest_pair_not_the_sum() -> None:
+    """A sum would put these two samples on opposite sides of `force_max`.
+
+    The per-pair maximum is what the derived bar describes: on peg-insert-side the summed
+    force is ~3.2 kN at nominal and falls as the contact stiffens, so thresholding it is
+    both unreachable and confounded with the stiffness axis.
+    """
     mon = ViolationMonitor(SPEC)
     assert not fired(mon.observe(info(force=[4.0, 3.0])), "V3")
-    assert fired(mon.observe(info(force=[4.0, 4.5])), "V3")
+    assert not fired(mon.observe(info(force=[4.0, 4.5])), "V3"), "4.0 + 4.5 > 8 must not fire"
+    assert fired(mon.observe(info(force=[4.0, 8.5])), "V3")
 
 
 def test_v4_penetration_uses_absolute_depth() -> None:

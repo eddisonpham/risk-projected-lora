@@ -276,6 +276,71 @@ chunk-level prefix/KV plumbing (`embed_prefix` + `vlm_with_expert.forward(fill_k
 "over-force" means) are appended to the consolidated list below along with 9–12 from the previous
 iteration.
 
+## Iteration 8 — G1 events re-derived on revised definitions (fails coverage again, with the reason)
+
+**Objective.** The previous iteration left G1 failing on the *violation-coverage* criterion and
+listed candidate definition revisions to decide on nominal data before any policy runs. This
+iteration implements those revisions, re-derives, and re-measures.
+
+**What changed** (all decided on nominal/expert data, no policy in the loop):
+
+1. **Derivation rule: nominal max x margin, not the 99.5th percentile.** The percentile describes
+the *step* distribution while V1-V5 are *episode* events: with ~0.5 % of steps above the bar and
+dozens of contact-bearing steps per episode, V4 fired in **62 % of nominal expert episodes**. Bars
+are now the peak nominal value times the same margins, so no nominal episode can cross them.
+2. **V3/V5 threshold the largest per-pair normal force, not the sum.** Measured: the summed force is
+~3.2 kN at nominal and *falls* to 975 N at `stiff_scale` 4.0 — a solver property (the soft-constraint
+contact solves more deeply), not a property of the manipulation. The per-pair maximum is 371 N
+(10 eps) / 1129 N peak (50 eps) at nominal.
+3. **`grasped` now means contact, not proximity.** The distance test (``||obj - eef|| < 0.06 m``)
+counted an object merely *near* the tool centre as held, so V1 measured the approach; the contact
+test uses the `groups: gripper/object` block already present in `configs/env/task_geoms.yaml` and is
+the same question Meta-World's own `touching_object` asks. `grasp_test` is logged per step, and a
+missing groups block falls back to the distance test *and says so* rather than reporting silently.
+4. **The end-effector-frame hypothesis for V1 was measured and rejected.** Expressed in the gripper
+frame via the `hand` body's `xmat`, nominal drift is 0.0773 m versus 0.0774 m in the world frame:
+the offset is not rotation-induced, so no frame change was added. What the 77-83 mm *is*: the task
+requires the peg to slide through the grasped jaws to be inserted, so V1 is an **out-of-envelope
+detector**, not a slip-rate detector. Logged as a limitation in `configs/violations.yaml`.
+
+**Measured.** New bars from 50 nominal expert episodes (`configs/violations.yaml`): slip 0.1239 m,
+drop 0.0899 m, per-pair force 1694 N, penetration 9.17 mm; nominal peaks recorded alongside.
+
+* **Pilot sweep** (3 scales x 15 eps per axis, 274 s, `runs/_g1/sensitivity_pilot_rev2.json`):
+nominal is now **clean** (V4 0.00 at scale 1.0, was 0.62). `axis_shift` **passes** (1.000, stiff axis),
+`readback_confirms_physics` **passes**. **Coverage still fails**: V2 0.067 (only at mu=0.25),
+V4 1.000 (only at stiff=0.25), V1/V3/V5 **0.000 everywhere**. The band criterion remains
+unevaluable without a policy.
+* **Induced-failure probe** (expert + N(0, sigma) action noise, nominal dynamics, 12 eps):
+sigma<=0.10 produces *no* event; 0.20 gives V4 0.08; 0.40 gives V2 0.17 and V4 0.17 with success
+still 0.83 — and V1/V3/V5 **still 0.00**. So these three are not merely rare on the expert; no actor
+we can currently produce evokes them.
+* **Why V3 is unreachable, quantitatively.** The axes do move per-pair force: 371 N nominal (10 eps),
+828 N at stiff 4.0, 1027 N at mass 4.0, 1106 N under sigma=0.4, 1109 N at a combined hard setting. But
+the *nominal 50-episode peak* (1129 N) already sits at the top of that range, so a max x 1.5 bar
+(1694 N) cannot be crossed: the nominal tail and the off-nominal body overlap.
+* **The full gate sweep was not run.** The 7-scale x 30-episode evaluation is ~20 min of MuJoCo on
+this box; it was started, stopped and replaced by the pilot above within this iteration's budget.
+G1's status is therefore unchanged (**not passed**) and its coverage number here is a pilot, not the
+gate.
+
+**Reflection.** The task *is* dynamics-sensitive (success shifts 13.3 pp on mu and mass in the pilot)
+and its read-backs verify — so the failure is not in the physics or in the sweep harness. One
+caveat worth recording, because it bites when the gate sweep is run at full size: the stiff axis'
+success response is small and sample-sensitive in the pilot (0.80 / 0.73 / 0.80 at 15 episodes per
+scale) while an earlier 6-episode probe at stiff 4.0 gave 0.00 — 15 episodes cannot separate a real
+shift from noise here, and the 7-scale x 30-episode run is what the gate thresholds were written for. It is that **V1-V5 are not a failure taxonomy for this
+task as performed by the scripted expert**: the insertion is achieved *by* sliding the peg in the
+jaws, and the largest forces come from contacts that legitimate manipulation always makes. Three of
+the five events cannot be evoked at all. `11_roadmap_and_gates.md` says "G1 fail -> switch task"
+(assembly-v3, hand-insert-v3, box-close-v3, then ManiSkill3), but the coverage criterion can also be
+read as testing the *wrong actor* (an expert is supposed to be failure-free). Both readings change
+something claim-relevant, so this is escalated rather than decided here (OPEN QUESTION 15).
+
+**Next 1-3 actions.** (1) Decide the fork in OQ 15. (2) G2 (VRAM on the real SmolVLA config) is
+independent of all of the above and is the next hard constraint. (3) The chunk-level prefix/KV
+plumbing for Stage A, which E0 needs regardless of which task survives.
+
 ### OPEN QUESTIONS (consolidated; append-only, never renumbered)
 9. **S0 provisioning.** `lerobot` 0.6.0 is installed with the `dataset` extra; S0 is blocked by the
    `smolvla_base` *checkpoint revision* (pre-processor-format) and needs a fresh download.
@@ -303,4 +368,21 @@ iteration.
 14. **Which force is "over-force"?** `mj_contactForce`'s normal component on a thin-box/mesh contact is
    a stiff-spring impulse (multi-kN at nominal), so the summed form is unreachable and stiffness-
    confounded. Per-pair max vs. filtered wrench vs. grip actuation force are three different events;
-   pick one with evidence that it is monotone in the axes.
+   pick one with evidence that it is monotone in the axes. *Resolved to per-pair max (iteration 8):
+   the sum falls with `stiff_scale`, the per-pair max rises with the axes — but the nominal 50-episode
+   peak (1129 N) overlaps the off-nominal body (371-1109 N), so the derived bar is still unreachable.
+   The remaining question is whether V3 should also **exclude the gripper-object pair** (the grasp's own
+   squeeze) and threshold only the manipulation contacts; the pilot could not separate them because
+   both are in the task-critical set.*
+15. **Does the coverage criterion mean "reachable by the expert" or "reachable by some policy"?**
+   Measured: with nominal-derived bars, the scripted expert evokes only V2 (mu axis) and V4 (stiff
+   axis); the other three are unreachable even under sigma=0.4 action noise. Three claim-relevant
+   routes, none decidable inside the current protocol: (a) evaluate coverage with a *failure-inducing*
+   actor (the sigma-perturbed chunks that D-crit already uses) and keep peg-insert-side; (b) follow
+   `11` and switch to `assembly-v3` / `hand-insert-v3` / `box-close-v3`; (c) demote V1/V3/V5 to
+   diagnostics and carry a smaller event set. Escalated to the human (CLAUDE.md, "When blocked").
+16. **V1 and V4 are out-of-envelope detectors, not failure signatures.** V1's quantity is dominated by
+   the peg slide that the insertion itself requires (83 mm at nominal), and V4 fires on *softer* than
+   nominal contacts (14.8 mm at stiff 0.25, 9.2 mm at 1.0, 4.4 mm at 4.0). If either is kept, every
+   axis result must be reported with it and its sign; if not, they should be demoted before critic
+   labels are generated (they are two of the five labels `any_violation` collapses).

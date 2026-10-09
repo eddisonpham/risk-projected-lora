@@ -25,8 +25,14 @@ if str(ROOT / "src") not in sys.path:
 
 DEFAULT_OUT = ROOT / "configs" / "violations_derived.yaml"
 
-#: Percentile rule per event, straight from ``04`` §4.
-PCT = 99.5
+#: Derivation rule (``04`` §4): a bar is the **largest value the scripted expert ever
+#: produced** at nominal dynamics, times a margin. The first attempt used the 99.5th
+#: percentile, which describes the *step* distribution while V1-V5 are *episode* events:
+#: with ~0.5 % of steps above the bar and dozens of contact-bearing steps per episode, V4
+#: fired in 62 % of nominal expert episodes. A bar above every nominal sample cannot be
+#: crossed at nominal by construction; how far outside the nominal envelope it sits is
+#: exactly what G1's violation-coverage criterion then measures.
+RULE = "nominal_max_x_margin"
 MARGIN = {"V1": 1.5, "V2": 1.5, "V3": 1.5, "V4": 1.0, "V5": 1.5}
 
 
@@ -114,15 +120,15 @@ def main(argv: list[str] | None = None) -> int:
     if not force:
         raise SystemExit("no steps were collected; the expert never produced a step")
 
-    def pct(values: list[float], q: float = PCT) -> float:
-        return float(np.percentile(np.asarray(values, dtype=np.float64), q)) if values else 0.0
+    def peak(values: list[float]) -> float:
+        return float(np.max(np.asarray(values, dtype=np.float64))) if values else 0.0
 
     derived = {
-        "slip_drift": pct(slip) * MARGIN["V1"],
-        "drop_dist": pct(drop) * MARGIN["V2"],
-        "force_max": pct(force) * MARGIN["V3"],
-        "penetration": max(pct(pen) * MARGIN["V4"], 1e-6),
-        "jam_force": pct(jam_force_windows) * MARGIN["V5"],
+        "slip_drift": peak(slip) * MARGIN["V1"],
+        "drop_dist": peak(drop) * MARGIN["V2"],
+        "force_max": peak(force) * MARGIN["V3"],
+        "penetration": max(peak(pen) * MARGIN["V4"], 1e-6),
+        "jam_force": peak(jam_force_windows) * MARGIN["V5"],
         "jam_progress_eps": float(cfg.violations.jam_progress_eps),
         "jam_steps": int(cfg.violations.jam_steps),
         "window": int(cfg.violations.window),
@@ -134,10 +140,20 @@ def main(argv: list[str] | None = None) -> int:
             "source": "scripted expert, nominal dynamics, nominal cell ONLY",
             "n_episodes": ns.episodes,
             "n_steps": len(force),
-            "percentile": PCT,
+            "rule": RULE,
+            "nominal_peaks": {
+                "slip_drift": peak(slip),
+                "drop_dist": peak(drop),
+                "force_max": peak(force),
+                "penetration": peak(pen),
+            },
             "margin": MARGIN,
-            # Absolute depth for V4 keeps the bar stiffness-independent (04 §4).
+            # Absolute depth for V4 keeps the bar stiffness-independent (04 §4). It is an
+            # out-of-envelope detector, not a stiffness signature: on a soft-constraint
+            # solver penetration falls as the contact stiffens (measured: 14.8 mm at
+            # stiff_scale 0.25, 8.6 mm nominal, 4.4 mm at 4.0).
             "v4_is_absolute_depth": True,
+            "v4_note": "fires on softer-than-nominal contacts; report it with the axis",
             "learned_checkpoint_in_loop": bool(ns.allow_learned and cfg.model.checkpoint),
             "config_hash": cfg.config_hash(),
             "git_sha": str(git_sha().get("sha", "")),

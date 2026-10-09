@@ -12,8 +12,10 @@ key                          meaning
 ``eef_pos``                  (3,) end-effector position
 ``object_pos``               (3,) manipulated-object position
 ``grasped``                  bool, is the object currently held
-``force``                    float *sum* over task-critical contact pairs, or an
-                             array of per-pair normal forces (summed here)
+``force``                    float, or an array of per-pair normal forces. Either way
+                             the **maximum** pair is thresholded (see V3): a sum is
+dominated by the stiffest meshing pair and, on a
+                             soft-constraint solver, *falls* as stiffness rises
 ``penetration``              float, or array of per-contact ``dist`` values; the
                              **absolute** penetration depth (metres). Kept
                              stiffness-independent on purpose, otherwise V4 would
@@ -32,7 +34,10 @@ optional
 Event definitions (``04`` §4):
 
 * **V1 slip** — grasped-object drift in the gripper frame above
-  ``spec.slip_drift`` within ``spec.window`` steps, while the object is grasped.
+  ``spec.slip_drift`` within ``spec.window`` steps, while the object is grasped. The
+  reference offset is taken at the first step of the grasp, so what the monitor needs
+  from the env is that ``grasped`` mean *in contact with* the object (measured: the
+  distance-only test made the arm's approach motion look like 0.077 m of slip).
 * **V2 drop** — a grasp had been established and the object left it: the
   object-gripper distance (windowed, and cleared at each new grasp so pre-grasp
   samples cannot count) exceeded ``spec.drop_dist``, or the grasp was lost
@@ -44,12 +49,16 @@ Event definitions (``04`` §4):
   held object to place it (the toy expert does exactly that, ~25 mm, so the rule
   reported a drop in 12/12 nominal episodes). ``object_height`` remains an
   accepted, optional field of ``step_info`` for provenance.
-* **V3 over-force** — summed normal contact force above ``spec.force_max``.
+* **V3 over-force** — the **largest per-pair** normal contact force above
+  ``spec.force_max``. A summed force is not usable here: at nominal dynamics the sum is
+  ~3.2 kN (four pad/claw-peg pairs) and it *decreases* with ``stiff_scale``, so a summed
+  bar is both unreachable and confounded with the stiffness axis it is supposed to help
+  measure. The per-pair maximum is 356 N at nominal and rises to ~1.0 kN on the mass axis.
 * **V4 penetration** — any task-critical contact depth above
   ``spec.penetration`` (absolute, so the stiffness axis cannot move the bar).
-* **V5 jam** — force above ``spec.jam_force`` for ``spec.jam_steps`` consecutive
-  steps while progress moved less than ``spec.jam_progress_eps`` (FACT's
-  precision/jam signature).
+* **V5 jam** — the same per-pair maximum above ``spec.jam_force`` for
+  ``spec.jam_steps`` consecutive steps while progress moved less than
+  ``spec.jam_progress_eps`` (FACT's precision/jam signature).
 
 ``any_violation = V1 or ... or V5`` is the scalar critic label; per-type labels
 are always stored, never collapsed.
@@ -98,13 +107,18 @@ def _vec3(value: Any, *, name: str) -> np.ndarray:
     return arr
 
 
-def _sum_force(value: Any) -> float:
+def _pair_force(value: Any) -> float:
+    """Largest per-pair normal force (``04`` §4 V3/V5).
+
+    Accepts a scalar or an array of per-pair values; a sum would be dominated by the
+    stiffest meshing pair and decreases as ``stiff_scale`` rises.
+    """
     arr = np.asarray(value, dtype=np.float64).reshape(-1)
     if arr.size == 0:
         return 0.0
     if not np.all(np.isfinite(arr)):
         raise ValueError(f"force contains non-finite values: {arr}")
-    return float(arr.sum()) if arr.size > 1 else float(arr[0])
+    return float(np.max(arr))
 
 
 def _max_penetration(value: Any) -> float:
@@ -187,7 +201,7 @@ class ViolationMonitor:
         eef = _vec3(step_info["eef_pos"], name="eef_pos")
         obj = _vec3(step_info["object_pos"], name="object_pos")
         grasped = bool(step_info["grasped"])
-        force = _sum_force(step_info["force"])
+        force = _pair_force(step_info["force"])
         pen = _max_penetration(step_info["penetration"])
         progress_m = float(step_info["progress_m"])
         if not np.isfinite(progress_m):
@@ -245,7 +259,7 @@ class ViolationMonitor:
             self._grasp_ref = None
             self._grasp_established = False
 
-        # ---- V3 over-force ---------------------------------------------
+        # ---- V3 over-force (largest per-pair normal force) --------------
         if force > self.spec.force_max:
             fired.add("V3")
 
