@@ -319,7 +319,13 @@ def _project_impl(
         # The denominator is always detached — that is what makes the "projected"
         # Jacobian exactly I - g gᵀ/||g||² rather than something unstated.
         ex = excess.detach() if cfg.backward == "ste" else excess
-        coef = ex.to(torch.float32).clamp_min(0.0) / gn2.detach().clamp_min(cfg.eta)
+        # ``gn2`` is [B] for a joint projection and [B, T] in per-token mode, so the
+        # coefficient must be shaped like it. A [B] coefficient broadcast against a
+        # per-token gradient is a hard shape error for any T > 1 -- and would be
+        # invisible at T == 1, which is why the per-token test uses T = 3.
+        coef = ex.to(torch.float32).clamp_min(0.0).reshape(
+            -1, *([1] * (gn2.dim() - 1))
+        ) / gn2.detach().clamp_min(cfg.eta)
         gd = g if cfg.backward == "second_order" else g.detach()
         gdv = _group_view(gd, cfg.per_token)
         u = coef.unsqueeze(-1) * gdv

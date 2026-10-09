@@ -1,0 +1,19 @@
+# E3 (G6) — the falsification pilot. One training seed, few cells, all arms. Its
+# purpose is to kill the idea cheaply if it deserves killing, and to fix MPCD and n
+# for E4. Anything tuned afterwards is tuned on VAL only.
+includes:
+  - ../env/peg_insert_side.yaml
+  - ../model/smolvla.yaml
+  - ../critic/mlp_ensemble.yaml
+  - ../train/stage_b.yaml
+  - ../eval/pilot.yaml
+  - ../dynamics/ranges.yaml
+  - ../dynamics/splits.yaml
+  - ../gates.yaml
+  - ../violations.yaml
+  - ../method/arms_pilot.yaml
+
+name: e3_pilot
+description: pilot over B0-B6 on a few VAL cells, one seed, all diagnostics on
+seed: 0
+seeds: [0]

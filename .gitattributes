@@ -1,0 +1,14 @@
+# Normalise to LF in the repository (the working tree is Windows here, and CRLF
+# churn would otherwise show up in every diff).
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.npy binary
+*.npz binary
+*.pt binary
+*.safetensors binary
+
+# Generated artifacts that must never be diffed or merged.
+runs/** -text -diff
+data/** -text -diff

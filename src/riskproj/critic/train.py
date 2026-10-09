@@ -44,6 +44,69 @@ class CriticSampleSource(Protocol):
     def __getitem__(self, index: int) -> CriticSample | Mapping[str, Any]: ...
 
 
+class _FeatureView(Sequence):  # type: ignore[type-arg]
+    """Presents a ``(ctx, chunk, any, per_type)`` dataset as precomputed features.
+
+    ``data.schema.CriticDataset`` — the format D-crit is actually stored in — yields
+    context and chunk and derives features on demand, while training consumes features.
+    Applying the feature map here keeps that one conversion in a single place, and it
+    uses the *same* :class:`FeatureSpec` the evaluation tables use, so the training and
+    evaluation layouts cannot drift apart.
+    """
+
+    def __init__(self, dataset: Any, builder: Any) -> None:
+        self.dataset = dataset
+        self.builder = builder
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def __getitem__(self, index: int) -> CriticSample:
+        ctx, chunk, y_any, y_type = self.dataset[index]
+        chunk_t = torch.as_tensor(chunk, dtype=torch.float32)
+        if chunk_t.dim() == 2:  # a dataset yields one sample, the builder speaks [B, H, A]
+            chunk_t = chunk_t[None]
+        elif chunk_t.dim() != 3:
+            raise ValueError(
+                f"a critic chunk must be [H, A] or [B, H, A]; got {tuple(chunk_t.shape)}"
+            )
+        feats = self.builder(ctx, chunk_t).reshape(-1)
+        return (
+            feats,
+            torch.as_tensor(y_any, dtype=torch.float32).reshape(()),
+            torch.as_tensor(y_type, dtype=torch.float32).reshape(-1),
+        )
+
+
+def _as_feature_source(dataset: Any, feature_spec: FeatureSpec) -> Any:
+    """Accept both sample conventions: ``(features, any, per_type)`` and the
+    ``(ctx, chunk, any, per_type)`` that :class:`riskproj.data.schema.CriticDataset`
+    yields. Detected from the first item, so a caller cannot pick the wrong one.
+    """
+    if len(dataset) == 0:
+        return dataset
+    sample = dataset[0]
+    if isinstance(sample, (tuple, list)) and len(sample) == 4:
+        from riskproj.critic.features import CriticFeatureBuilder
+
+        builder = CriticFeatureBuilder.from_spec(_spec_cfg(feature_spec), feature_spec)
+        return _FeatureView(dataset, builder)
+    return dataset
+
+
+def _spec_cfg(feature_spec: FeatureSpec) -> CriticCfg:
+    """A ``CriticCfg`` consistent with ``feature_spec``.
+
+    ``from_spec`` lets the stored spec win on every layout field, so this only has to
+    carry the feature-source flags the spec itself encodes.
+    """
+    return CriticCfg(
+        use_history=int(getattr(feature_spec, "hist_len", 1) or 1),
+        use_vision=bool(getattr(feature_spec, "use_vision", False)),
+        privileged_force=bool(getattr(feature_spec, "privileged_force", False)),
+    )
+
+
 @dataclass
 class CriticTrainConfig:
     """Optimisation knobs, mirroring the relevant :class:`CriticCfg` fields."""
@@ -263,6 +326,11 @@ def train_critic(
     disagreement a usable OOD signal rather than an artefact of one seed.
     """
     tcfg = CriticTrainConfig.from_cfg(cfg)
+    # D-crit stores context and chunk; the feature map is applied once, here, so every
+    # consumer below sees the ``(features, any, per_type)`` samples this module consumes.
+    dataset = _as_feature_source(dataset, feature_spec)
+    if val_dataset is not None:
+        val_dataset = _as_feature_source(val_dataset, feature_spec)
     n = len(dataset)
     if n == 0:
         raise ValueError("critic dataset is empty")

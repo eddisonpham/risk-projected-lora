@@ -1,0 +1,11 @@
+# TRAIN / VAL / TEST-combo roles are *derived* from the sign rules in agents/04 §3,
+# never listed here (a hand-typed table is a leak waiting to happen). Only the two
+# compound extrapolation cells are a genuine choice, because the rules do not
+# determine them: one takes xL on friction with xH on mass, one the reverse, so
+# both signs of each axis appear in TEST-range.
+splits:
+  range_compound: [xL-xH-M, xH-xL-M]
+  note: >-
+    Derived rules: 0-1 non-MID axis -> TRAIN (7); two non-MID with sign product +1
+    -> VAL (6); sign product -1 or all three non-MID -> TEST-combo (14); any
+    extrapolation level -> TEST-range (6 single-axis + range_compound = 8).

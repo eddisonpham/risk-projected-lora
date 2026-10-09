@@ -1,0 +1,52 @@
+# E3 pilot arms (agents/08 §2, agents/11 P6). One seed, VAL-style cells: cheap and
+# decisive, and its job is to falsify, not to impress.
+#
+# B1-LN is the FACT noise-schedule control: if it matches B3, the contact-rich gain
+# is a schedule effect, not risk information. B5/B6 test selection and gating as
+# competing explanations for the same critic. B4a/B4b test whether the latent site
+# adds anything over action-space correction.
+methods:
+  - id: B0
+    train_mode: "0"
+    inference_mode: "0"
+    notes: frozen pi_base, no LoRA
+  - id: B1
+    train_mode: "0"
+    inference_mode: "0"
+  - id: B1-LN
+    train_mode: "0"
+    inference_mode: "0"
+    noise_schedule: logit_normal
+    ln_m: 1.5
+    ln_s: 1.0
+    notes: FACT Logit-Normal tau schedule (flow heads only)
+  - id: B2
+    train_mode: pen
+    inference_mode: "0"
+    # lambda is selected on VAL, same budget as every other method's tuning.
+    lambda: 0.1
+    notes: terminal-estimate critic penalty
+  - id: B3
+    train_mode: lat
+    inference_mode: lat
+    projection: {tau: 0.5, eta: 1.0e-8, K: 1, space: prob, backward: projected}
+  - id: B4a
+    train_mode: "0"
+    inference_mode: act-post
+    projection: {tau: 0.5, eta: 1.0e-8, K: 1, space: prob}
+    notes: Dalal-style action-space projection of the final chunk
+  - id: B4b
+    train_mode: "0"
+    inference_mode: act-flow
+    projection: {tau: 0.5, K: 1, steps_active: 3, tau_proj: 0.3}
+    notes: in-flow guidance of x_tau at the last m steps
+  - id: B5
+    train_mode: "0"
+    inference_mode: bon
+    best_of_n: 8
+    notes: critic best-of-N over flow noise (V-GPS style)
+  - id: B6
+    train_mode: "0"
+    inference_mode: gate
+    projection: {tau: 0.5}
+    notes: critic gates only; risky chunk -> fallback ladder, no correction

@@ -463,9 +463,47 @@ def load_yaml(path: str | Path) -> dict[str, Any]:
     return data
 
 
+def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Recursive dict merge; ``override`` wins, nested mappings merge key-wise."""
+    out = dict(base)
+    for key, value in override.items():
+        if key in out and isinstance(out[key], dict) and isinstance(value, dict):
+            out[key] = deep_merge(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
+def load_config_raw(path: str | Path, *, _seen: tuple[Path, ...] = ()) -> dict[str, Any]:
+    """Load a config fragment, resolving ``includes:`` depth-first then overriding.
+
+    The layout in ``03`` §1 keeps one fragment per section
+    (``configs/env/…``, ``configs/model/…``, …). Fragments are partial
+    ``ExperimentCfg`` mappings, so an experiment config names the ones it composes::
+
+        includes: [../env/toy.yaml, ../model/toy.yaml]
+        name: toy_smoke
+
+    Later includes win over earlier ones, and the including file's own keys win
+    over all of them. Cycles raise instead of hanging.
+    """
+    p = Path(path).resolve()
+    if p in _seen:
+        chain = " -> ".join(str(Path(s).name) for s in (*_seen, p))
+        raise ValueError(f"config include cycle: {chain}")
+    raw = dict(load_yaml(p))
+    includes = raw.pop("includes", []) or []
+    if not isinstance(includes, (list, tuple)):
+        raise TypeError(f"{p.name}: 'includes' must be a list of paths")
+    merged: dict[str, Any] = {}
+    for inc in includes:
+        merged = deep_merge(merged, load_config_raw(p.parent / str(inc), _seen=(*_seen, p)))
+    return deep_merge(merged, raw)
+
+
 def load_config(path: str | Path) -> ExperimentCfg:
     """Load and validate an experiment config. Raises on unknown/missing keys."""
-    return ExperimentCfg.model_validate(load_yaml(path))
+    return ExperimentCfg.model_validate(load_config_raw(path))
 
 
 def dump_config(cfg: ExperimentCfg, path: str | Path) -> Path:
@@ -504,8 +542,10 @@ __all__ = [
     "TrainCfg",
     "ViolationCfg",
     "VramGateCfg",
+    "deep_merge",
     "dump_config",
     "load_config",
+    "load_config_raw",
     "load_config_from_dir",
     "load_yaml",
 ]

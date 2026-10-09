@@ -1,0 +1,14 @@
+# Main evaluation (E4). 40 episodes per cell follows FACT's per-task default
+# (agents/09 §2); n and the minimum practically meaningful difference are written
+# into the prereg tag after the pilot, before any TEST episode is run.
+# TEST-combo and TEST-range are reported separately and never pooled (agents/09 §2).
+eval:
+  eps_per_cell: 40
+  splits: [val, test_combo, test_range]
+  max_steps: null
+  record_decisions: true
+  crn: true
+  deterministic_policy: false
+  save_states: true
+  state_save_every: 1
+  n_states_per_cell: 20

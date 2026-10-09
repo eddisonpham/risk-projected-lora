@@ -98,13 +98,24 @@ class CtxBuilder:
     """
 
     def __init__(
-        self, hist_len: int = 1, *, use_vision: bool = False, privileged_force: bool = False
+        self,
+        hist_len: int = 1,
+        *,
+        use_vision: bool = False,
+        privileged_force: bool = False,
+        action_dim: int | None = None,
     ) -> None:
         if hist_len < 0:
             raise ValueError("hist_len must be >= 0")
         self.hist_len = int(hist_len)
         self.use_vision = bool(use_vision)
         self.privileged_force = bool(privileged_force)
+        #: Width of one action vector, when the caller knows it. Needed because the
+        #: *first* decision of an episode has no action history yet, and the block still
+        #: has to be padded to the real action width for the feature layout to be stable
+        #: across rows (a zero-width block is what made ``CriticDataset.save`` unable to
+        #: stack its shards).
+        self._action_dim = int(action_dim or 0)
         self._actions: list[np.ndarray] = []
         self._proprios: list[np.ndarray] = []
         self._last: StepObs | None = None
@@ -121,6 +132,26 @@ class CtxBuilder:
         self._last = step
 
     # -- accessors -------------------------------------------------------
+    def _action_width(self) -> int:
+        """Width of one action vector.
+
+        The action history must be padded to the *action* width. Padding it to the
+        proprio width — which every task here differs from — produced a flat block
+        whose size did not divide by the action dim, so reloading the stored tuples
+        raised in ``data/schema.py``. Before any action has been observed the declared
+        ``action_dim`` is used; if neither is known, the block is empty and
+        ``context_vector`` skips it.
+        """
+        if not self._actions:
+            return self._action_dim
+        observed = int(self._actions[-1].shape[0])
+        if self._action_dim and observed != self._action_dim:
+            raise ValueError(
+                f"observed action width {observed} contradicts the declared action_dim "
+                f"{self._action_dim}; the history block would have the wrong width"
+            )
+        return observed
+
     def _tail(self, buf: list[np.ndarray], width: int) -> np.ndarray:
         """Last ``hist_len`` entries, left-padded with zeros (never a ragged array)."""
         n = max(self.hist_len, 1)
@@ -142,7 +173,7 @@ class CtxBuilder:
         ctx: dict[str, np.ndarray] = {
             "proprio": proprio,
             "ee_vel": last.ee_vel.astype(np.float32),
-            "action_hist": self._tail(self._actions, proprio.shape[0]),
+            "action_hist": self._tail(self._actions, self._action_width()),
             "proprio_hist": self._tail(self._proprios, proprio.shape[0]),
         }
         ctx["vision_emb"] = (

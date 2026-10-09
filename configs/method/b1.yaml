@@ -1,0 +1,6 @@
+# B1 — standard LoRA SFT on D-B. The reference every claim is measured against.
+methods:
+  - id: B1
+    train_mode: "0"
+    inference_mode: "0"
+    notes: standard PEFT baseline (agents/08 §2)

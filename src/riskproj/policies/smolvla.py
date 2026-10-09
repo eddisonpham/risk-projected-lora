@@ -54,9 +54,9 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["EXPERT_ENTRY_POINTS", "SmolVLAAdapter"]
 
-#: Candidate names for "run one denoising step of the action expert". Unverified [R] —
-#: extend this list (never replace it) once the real name is known, so the error
-#: message keeps showing everything that was tried.
+#: Candidate names for "run one denoising step of the action expert".
+#: ``denoise_step`` is **verified** against lerobot 0.6.0 (2026-10-09); the rest are the
+#: original guesses and stay so the search keeps showing everything it tried.
 EXPERT_ENTRY_POINTS: tuple[str, ...] = (
     "denoise_step",
     "flow_step",
@@ -65,6 +65,15 @@ EXPERT_ENTRY_POINTS: tuple[str, ...] = (
     "forward_action_expert",
     "expert_forward",
 )
+
+#: Where the per-step callable lives, as attribute paths from the policy object.
+#: **Verified [V] lerobot 0.6.0**: ``SmolVLAPolicy.model`` is ``VLAFlowMatching`` and
+#: ``VLAFlowMatching.denoise_step(prefix_pad_masks, past_key_values, x_t, timestep)``
+#: is the one-step map ``(x_tau, tau) -> v``; ``sample_actions`` calls it in its
+#: integration loop, ``x_t <- x_t + dt * v_t`` with ``dt = -1/num_steps`` from
+#: ``tau = 1.0``. So **tau = 1 is noise** and ``v* = eps - a0`` (``05`` §4, now [V]
+#: rather than [R]). ``""` is the policy object itself.
+EXPERT_ENTRY_ROOTS: tuple[str, ...] = ("model", "")
 
 _SKIP_REMEDIATION = "install with: python tasks.py bootstrap-sim"
 #: Spec defaults for the projection window, overridable per batch from ProjCfg.
@@ -109,6 +118,7 @@ class SmolVLAAdapter(PolicyAdapterBase, FlowPolicyMixin, nn.Module):
         self.matched: dict[str, str] = {}
         self.site_errors: dict[str, str] = {}
         self._step_name: str | None = None
+        self._step_entry_error: str | None = None
         self._packaging: Any = None  # how the site module wraps its output (tuple, ...)
         self._checkpoint = checkpoint or cfg.checkpoint
         if load:
@@ -167,17 +177,35 @@ class SmolVLAAdapter(PolicyAdapterBase, FlowPolicyMixin, nn.Module):
             "entry point and record it in agents/research_log/LOG.md."
         )
 
-    def _find_step_entry(self) -> str:
-        for name in EXPERT_ENTRY_POINTS:
-            if callable(getattr(self._model, name, None)):
-                logger.info("SmolVLA per-step entry point: %s", name)
-                return name
-        raise NotImplementedError(
-            "no per-denoising-step entry point found on the loaded SmolVLA policy; tried "
-            f"{list(EXPERT_ENTRY_POINTS)}. Projection needs per-step access (05 §4). "
-            "Inspect the module tree (scripts/inspect_model.py) and extend EXPERT_ENTRY_POINTS, "
-            "or record this as an OPEN QUESTION in agents/research_log/LOG.md."
+    def _find_step_entry(self) -> str | None:
+        """Locate the per-denoising-step callable; record a miss instead of dying.
+
+        Returning ``None`` (with the reason in :attr:`_step_entry_error`) is deliberate:
+        ``scripts/inspect_model.py`` (smoke S3) must be able to walk the module tree to
+        *resolve* unverified names, and it cannot do that if loading aborts on the very
+        thing S3 exists to discover. Anything that actually needs a step goes through
+        :meth:`_step_fn`, which raises with the recorded reason.
+        """
+        tried: list[str] = []
+        for root in EXPERT_ENTRY_ROOTS:
+            holder = self._model if not root else getattr(self._model, root, None)
+            if holder is None:
+                tried.append(f"{root or '<policy>'} (no such attribute)")
+                continue
+            for name in EXPERT_ENTRY_POINTS:
+                path = f"{root}.{name}" if root else name
+                if callable(getattr(holder, name, None)):
+                    logger.info("SmolVLA per-step entry point: %s", path)
+                    return path
+                tried.append(path)
+        self._step_entry_error = (
+            f"no per-denoising-step entry point found on the loaded SmolVLA policy; tried {tried}. "
+            "Projection needs per-step access (05 §4). Record what the loaded model actually "
+            "exposes in agents/research_log/LOG.md and extend EXPERT_ENTRY_ROOTS/"
+            "EXPERT_ENTRY_POINTS."
         )
+        logger.warning(self._step_entry_error)
+        return None
 
     # ------------------------------------------------------------------
     # sites
@@ -191,6 +219,16 @@ class SmolVLAAdapter(PolicyAdapterBase, FlowPolicyMixin, nn.Module):
 
     def sites(self) -> dict[str, Any]:
         return dict(self._sites)
+
+    def site_tree(self) -> Any:
+        """The loaded LeRobot policy: the tree site patterns are named against.
+
+        Site discovery (:meth:`_discover_sites`) runs over ``self._model``, so the
+        sites file must be written in the same namespace. Without this override the
+        discovery script walks the *adapter*, every name gains a ``_model.`` prefix,
+        and resolution fails for all sites while still looking like a valid file.
+        """
+        return self._model
 
     def site_module(self, site: str) -> Any:
         if site in self._sites:
@@ -208,6 +246,7 @@ class SmolVLAAdapter(PolicyAdapterBase, FlowPolicyMixin, nn.Module):
             "matched": dict(self.matched),
             "errors": dict(self.site_errors),
             "step_entry": self._step_name,
+            "step_entry_error": self._step_entry_error,
             "sites_file": str(sites_file),
             "sites_file_exists": sites_file.exists(),
         }
@@ -216,14 +255,18 @@ class SmolVLAAdapter(PolicyAdapterBase, FlowPolicyMixin, nn.Module):
     # one denoising step, and the tail after a site
     # ------------------------------------------------------------------
     def _step_fn(self) -> Callable[..., Any]:
+        if self._step_entry_error is not None:
+            raise NotImplementedError(self._step_entry_error)
         if self._step_name is None:
             raise RuntimeError("adapter is not loaded; call _load() first")
-        fn = getattr(self._model, self._step_name, None)
-        if not callable(fn):
+        obj: Any = self._model
+        for part in self._step_name.split("."):
+            obj = getattr(obj, part, None)
+        if not callable(obj):
             raise NotImplementedError(
                 f"the per-step entry point {self._step_name!r} disappeared from the model"
             )
-        return fn
+        return obj
 
     def capture_step_site(self, ctx: AdapterContext, site: str) -> Tensor:
         """Run one unsubstituted step and return the site activation.

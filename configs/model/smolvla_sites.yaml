@@ -1,0 +1,80 @@
+git_sha: 9efe571abdea8093e4c00dd1e47f4e43bda403f6
+model_name: smolvla
+schema_version: 1
+sites:
+  S0:
+    capture: output
+    downstream: identity
+    id: S0
+    kind: action_final
+    matched_by: ''
+    module_pattern: ''
+    notes: final chunk, post-hoc; this IS B4a (Dalal-style action-space correction)
+  S0f:
+    capture: output
+    downstream: terminal estimate
+    id: S0f
+    kind: action_guidance
+    matched_by: ''
+    module_pattern: ''
+    notes: guidance applied to x_tau at the last m denoising steps; this IS B4b
+  S1:
+    capture: input
+    downstream: final action linear
+    id: S1
+    kind: expert_block
+    matched_by: ''
+    module_pattern: model.action_out_proj
+    notes: last expert hidden state, i.e. the input of the action output projection
+  S2:
+    capture: output
+    downstream: rest of the last block + final action linear
+    id: S2
+    kind: expert_block
+    matched_by: ''
+    module_pattern: model.vlm_with_expert.lm_expert.layers.15.mlp.down_proj
+    notes: 'DEFAULT site: MLP down-projection output of the last expert block'
+  S3:
+    capture: output
+    downstream: remaining expert blocks + final linear
+    id: S3
+    kind: expert_block
+    matched_by: ''
+    module_pattern: model.vlm_with_expert.lm_expert.layers.5.self_attn.o_proj
+    notes: "mid expert block, cross-attention output projection (reads the frozen\
+      \ VLM KV). Naming trap [V]: SmolVLA routes cross-attention by layer *parity*\
+      \ inside the same `self_attn` module, so this site resolves to `lm_expert.layers.<odd>.self_attn.o_proj`\
+      \ \u2014 the module is called self_attn even where it cross-attends."
+  S4:
+    capture: output
+    downstream: remaining expert blocks + final linear
+    id: S4
+    kind: expert_block
+    matched_by: ''
+    module_pattern: model.vlm_with_expert.lm_expert.layers.4.self_attn.o_proj
+    notes: "mid expert block, self-attention output projection (mixes action tokens);\
+      \ resolves to `lm_expert.layers.<even>.self_attn.o_proj` \u2014 even layers\
+      \ are the ones that run self-attention (self_attn_every_n_layers=2)"
+  S5:
+    capture: output
+    downstream: most of the expert
+    id: S5
+    kind: expert_block
+    matched_by: ''
+    module_pattern: model.vlm_with_expert.lm_expert.layers.0.mlp.down_proj
+    notes: early expert block; longer path, costlier gradient
+  S6:
+    capture: output
+    downstream: whole expert x num_flow_steps
+    id: S6
+    kind: vlm_layer
+    matched_by: ''
+    module_pattern: model.vlm_with_expert.vlm.model.text_model.layers.15.mlp.down_proj
+    notes: 'STRETCH: VLM text-layer output; one-time per chunk but the heaviest gradient.
+      [V] the VLM text layers run only in the prefix pass (fill_kv_cache=True), never
+      inside a denoising step, so projecting here means substituting the activation,
+      re-running the prefix once, and then the whole flow.'
+source: scripts/inspect_model.py --model smolvla
+unverified_patterns:
+- S0
+- S0f

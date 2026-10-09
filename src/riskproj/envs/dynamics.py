@@ -24,6 +24,7 @@ Two targets are supported:
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -152,11 +153,31 @@ def task_critical_geoms(target: Any = None, *, path: str | Path | None = None) -
         name = getattr(target, "task_name", None) or getattr(
             getattr(target, "unwrapped", None), "task_name", None
         )
-        if name and str(name) != str(spec["task"]):
+        if name and not _task_names_match(str(name), str(spec["task"])):
             raise ValueError(
                 f"task_geoms.yaml was written for task {spec['task']!r} but the env is {name!r}"
             )
     return spec
+
+
+#: Tokens that carry no task identity in a Meta-World *class* name.
+_TASK_NAME_NOISE = frozenset({"sawyer", "env", "v2", "v3", "mt1"})
+
+
+def _task_names_match(env_name: str, config_task: str) -> bool:
+    """Do an env's self-reported name and a config task id denote the same task?
+
+    A Meta-World env reports its **class** name (``SawyerPegInsertionSideEnvV3``) while
+    a config uses the **registered id** (``peg-insert-side-v3``), so exact comparison
+    rejects a perfectly good geoms file. Nor does normalizing help: the class says
+    "Insertion" and the id says "insert". So the *id's* tokens must all appear in the
+    class name — ``assembly-v3`` against the peg env fails on ``assembly``, which is the
+    mismatch worth failing on.
+    """
+    haystack = "".join(ch for ch in env_name.lower() if ch.isalnum())
+    tokens = [t for t in re.split(r"[^a-z0-9]+", config_task.lower()) if t]
+    tokens = [t for t in tokens if t not in _TASK_NAME_NOISE]
+    return bool(tokens) and all(token in haystack for token in tokens)
 
 
 # --------------------------------------------------------------------------
@@ -186,13 +207,52 @@ def _mujoco_handles(target: Any) -> tuple[Any | None, Any | None]:
     return None, None
 
 
+#: Token prefix for elements the model does not name (``geom39``).
+UNNAMED_PREFIX = "geom"
+
+
+def _unnamed_index(token: str, *, model: Any, mujoco: Any, obj: Any) -> int | None:
+    """Resolve a ``geom<id>`` token, or ``None`` if it is not one.
+
+    Meta-World adds the peg aperture's collision boxes **unnamed**, so they cannot be
+    addressed by name at all; ``scripts/inspect_contacts.py`` emits ``geom<id>`` for
+    them and this is the only place that convention is interpreted. It is validated
+    twice (in range, and *actually* unnamed) so a typo is an error rather than a
+    silent no-op on some other geom.
+    """
+    if not token.startswith(UNNAMED_PREFIX):
+        return None
+    suffix = token[len(UNNAMED_PREFIX) :]
+    if not suffix.isdigit():
+        return None
+    index = int(suffix)
+    count = int(getattr(model, "ngeom", 0)) if obj == mujoco.mjtObj.mjOBJ_GEOM else int(
+        getattr(model, "nbody", 0)
+    )
+    if not 0 <= index < count:
+        raise KeyError(f"{token!r} is out of range (the model has {count} of them)")
+    if mujoco.mj_id2name(model, obj, index) is not None:
+        raise KeyError(
+            f"{token!r} is a positional reference but that element *is* named; address it by "
+            "name so the config survives a model rebuild"
+        )
+    return index
+
+
 def _geom_ids(model: Any, mujoco: Any, names: Sequence[str]) -> list[int]:
     ids: list[int] = []
     for name in names:
-        gid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, str(name))
+        token = str(name)
+        gid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, token)
         if gid < 0:
+            gid = _unnamed_index(
+                token, model=model, mujoco=mujoco, obj=mujoco.mjtObj.mjOBJ_GEOM
+            )
+        if gid is None or gid < 0:
             raise KeyError(
-                f"geom {name!r} not found in the model; check configs/env/task_geoms.yaml"
+                f"geom {name!r} not found in the model; check configs/env/task_geoms.yaml "
+                "(unnamed geoms must be written as geom<id>, the token "
+                "scripts/inspect_contacts.py prints)"
             )
         ids.append(int(gid))
     return ids
@@ -201,13 +261,23 @@ def _geom_ids(model: Any, mujoco: Any, names: Sequence[str]) -> list[int]:
 def _body_ids(model: Any, mujoco: Any, names: Sequence[str]) -> list[int]:
     ids: list[int] = []
     for name in names:
-        bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, str(name))
+        token = str(name)
+        bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, token)
         if bid < 0:
+            bid = _unnamed_index(token, model=model, mujoco=mujoco, obj=mujoco.mjtObj.mjOBJ_BODY)
+        if bid is None or bid < 0:
             raise KeyError(
                 f"body {name!r} not found in the model; check configs/env/task_geoms.yaml"
             )
         ids.append(int(bid))
     return ids
+
+
+def resolve_geom_ids(model: Any, names: Sequence[str]) -> list[int]:
+    """Public name -> geom-id resolver (``geom<id>`` included); see :func:`_geom_ids`."""
+    import mujoco
+
+    return _geom_ids(model, mujoco, names)
 
 
 def _baseline(
@@ -318,12 +388,14 @@ def _apply_mujoco(
         or np.any(np.array([v[0] for v in eff_solref.values()]) != base["solref"][:, 0])
     )
 
+    # Mean over geoms of the *per-geom* achieved scale. Stiffness goes as 1/timeconst**2
+    # (04 §2), so the achieved stiff_scale is the mean of (baseline_tc / effective_tc)**2;
+    # averaging the timeconsts first would report a scale no geom actually has.
+    eff_tc = np.array([v[0] for v in eff_solref.values()], dtype=np.float64)
     effective = {
         "mu_scale": float(np.mean(np.array(list(eff_mu.values())) / base["mu"])),
         "mass_scale": float(np.mean(np.array(list(eff_mass.values())) / base["mass"])),
-        "stiff_scale": float(
-            (base["solref"][:, 0].mean() / np.array([v[0] for v in eff_solref.values()])) ** 2
-        ),
+        "stiff_scale": float(np.mean((base["solref"][:, 0] / eff_tc) ** 2)),
     }
     verified = (
         abs(effective["mu_scale"] - spec.mu_scale) <= max(tol, 1e-6 * abs(spec.mu_scale))

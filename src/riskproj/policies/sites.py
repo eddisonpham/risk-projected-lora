@@ -115,13 +115,22 @@ SITE_CATALOG: dict[str, SiteSpec] = {
         "S3",
         "expert_block",
         "remaining expert blocks + final linear",
-        notes="mid expert block, cross-attention output projection (reads the frozen VLM KV)",
+        notes=(
+            "mid expert block, cross-attention output projection (reads the frozen VLM KV). "
+            "Naming trap [V]: SmolVLA routes cross-attention by layer *parity* inside the "
+            "same `self_attn` module, so this site resolves to `lm_expert.layers.<odd>."
+            "self_attn.o_proj` — the module is called self_attn even where it cross-attends."
+        ),
     ),
     "S4": _spec(
         "S4",
         "expert_block",
         "remaining expert blocks + final linear",
-        notes="mid expert block, self-attention output projection (mixes action tokens)",
+        notes=(
+            "mid expert block, self-attention output projection (mixes action tokens); "
+            "resolves to `lm_expert.layers.<even>.self_attn.o_proj` — even layers are the "
+            "ones that run self-attention (self_attn_every_n_layers=2)"
+        ),
     ),
     "S5": _spec(
         "S5",
@@ -133,20 +142,80 @@ SITE_CATALOG: dict[str, SiteSpec] = {
         "S6",
         "vlm_layer",
         "whole expert x num_flow_steps",
-        notes="STRETCH: VLM text-layer output; one-time per chunk but the heaviest gradient",
+        notes=(
+            "STRETCH: VLM text-layer output; one-time per chunk but the heaviest gradient. "
+            "[V] the VLM text layers run only in the prefix pass (fill_kv_cache=True), never "
+            "inside a denoising step, so projecting here means substituting the activation, "
+            "re-running the prefix once, and then the whole flow."
+        ),
     ),
 }
 
-#: Heuristic module-name substrings, used ONLY when no authoritative pattern is
-#: available. Every one of these is a guess about LeRobot's SmolVLA naming [R] and
-#: is reported through ``SiteSpec.matched_by`` so a run's log shows what it used.
+#: Module-name patterns per site, tried in order. The **verified** patterns come
+#: first (they were read out of LeRobot 0.6.0 on 2026-10-09 through
+#: ``scripts/inspect_model.py``); the original guesses stay behind them so a
+#: different upstream layout still resolves, and ``SiteSpec.matched_by`` records
+#: which pattern actually fired.
+#:
+#: Verified SmolVLA facts (``05`` sections 2-3, tags upgraded from [R] to [V]):
+#:
+#: * the action expert is ``model.vlm_with_expert.lm_expert``, a Llama stack of
+#:   ``num_vlm_layers`` = 16 blocks of width 0.75·960 = 720;
+#: * ``self_attn_every_n_layers = 2`` splits them by **parity**: even ``layer_idx``
+#:   runs self-attention over the action tokens, **odd** layers run cross-attention
+#:   against the frozen VLM key-values (their ``k_proj``/``v_proj`` are re-created to
+#:   take the VLM's kv width — 320 — which is how the tree makes the split visible);
+#: * so S3 (cross-attn output proj) and S4 (self-attn output proj) are the *same*
+#:   module path with **opposite parity**, and the parity must be in the pattern;
+#: * ``action_out_proj`` maps the expert width 720 to ``max_action_dim`` 32, and the
+#:   action chunk is stored padded to 32 — not to the task's 4 (`05` §2);
+#: * the VLM text layers run **only in the prefix pass** (``fill_kv_cache=True``),
+#:   never during a denoising step, so S6 is a prefix-pass site.
 CANDIDATE_PATTERNS: dict[str, tuple[str, ...]] = {
-    "S1": ("action_out", "action_output", "action_proj", "action_head", "final_action"),
-    "S2": ("down_proj", "mlp.down", "ffn.down", "mlp_up"),
-    "S3": ("cross_attn", "cross_attention", "crossattention"),
-    "S4": ("self_attn", "self_attention", "selfattention"),
-    "S5": ("layers.0.", "blocks.0.", "layer_0", "block_0"),
-    "S6": ("text_model", "language_model", "text_layers", ".vlm.", "vlm."),
+    "S1": (
+        "*model.action_out_proj",
+        "action_out",
+        "action_output",
+        "action_proj",
+        "action_head",
+        "final_action",
+    ),
+    "S2": (
+        "*lm_expert.layers.*.mlp.down_proj",  # tie-break: highest block index
+        "down_proj",
+        "mlp.down",
+        "ffn.down",
+        "mlp_up",
+    ),
+    "S3": (
+        "*lm_expert.layers.[13579].self_attn.o_proj",
+        "*lm_expert.layers.1[135].self_attn.o_proj",
+        "cross_attn",
+        "cross_attention",
+        "crossattention",
+    ),
+    "S4": (
+        "*lm_expert.layers.[02468].self_attn.o_proj",
+        "*lm_expert.layers.1[02468].self_attn.o_proj",
+        "self_attn",
+        "self_attention",
+        "selfattention",
+    ),
+    "S5": (
+        "*lm_expert.layers.*.mlp.down_proj",  # tie-break: lowest block index
+        "layers.0.",
+        "blocks.0.",
+        "layer_0",
+        "block_0",
+    ),
+    "S6": (
+        "*vlm.model.text_model.layers.*.mlp.down_proj",
+        "text_model",
+        "language_model",
+        "text_layers",
+        ".vlm.",
+        "vlm.",
+    ),
 }
 
 #: Depth-sweep order used by ablation A9 (`10` Wave 2).
@@ -279,6 +348,30 @@ def _matches(name: str, patterns: tuple[str, ...]) -> str:
     return ""
 
 
+def _pattern_family(
+    model: nn.Module, patterns: tuple[str, ...]
+) -> tuple[list[tuple[str, str]], str]:
+    """All ``(name, pattern)`` matches of the **first** pattern that matches anything.
+
+    Priority, not union: a site's first pattern is its verified family (``05`` §3),
+    and mixing families is how the tie-break rules went wrong. Concretely, S2's family
+    is "expert MLP down-projections", and picking the highest block index within it
+    gives the last expert block. Under union semantics the same rule also saw the VLM
+    text stack (also 16 blocks, also ``mlp.down_proj``) and a plain alphabetical
+    tie-break put S2 in the vision-language stack — silently, and with a name that
+    looks plausible.
+    """
+    for pattern in patterns:
+        if not pattern:
+            continue
+        family = [
+            (name, pattern) for name, _ in _iter_module_names(model) if _matches(name, (pattern,))
+        ]
+        if family:
+            return family, pattern
+    return [], ""
+
+
 def discover_candidates(
     model: nn.Module,
     spec: SiteSpec,
@@ -302,11 +395,11 @@ def discover_candidates(
         if patterns is not None
         else ((spec.module_pattern,) if spec.module_pattern else CANDIDATE_PATTERNS[spec.id])
     )
-    found: list[tuple[str, nn.Module, str]] = []
-    for name, module in _iter_module_names(model):
-        pattern = _matches(name, pats)
-        if pattern:
-            found.append((name, module, pattern))
+    family, _pattern = _pattern_family(model, pats)
+    by_name = dict(_iter_module_names(model))
+    found: list[tuple[str, nn.Module, str]] = [
+        (name, by_name[name], pattern) for name, pattern in family if name in by_name
+    ]
     if found and spec.id == "S1" and action_dim is not None:
         narrowed = [
             (n, m, p)

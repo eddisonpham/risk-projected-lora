@@ -1,0 +1,48 @@
+# E4 (G7) — the pre-registered main comparison. Nothing here may be edited after
+# the tag prereg/E4 is created and the first TEST episode is run; any post-hoc
+# change turns the result into an exploratory one that must be labelled as such.
+# MPCD and n are written in only after the pilot estimates the discordant-pair rate.
+includes:
+  - ../env/peg_insert_side.yaml
+  - ../model/smolvla.yaml
+  - ../critic/mlp_ensemble.yaml
+  - ../train/stage_b.yaml
+  - ../eval/main.yaml
+  - ../dynamics/ranges.yaml
+  - ../dynamics/splits.yaml
+  - ../gates.yaml
+  - ../violations.yaml
+
+name: e4_main
+description: pre-registered B3 vs B1/B2/B4a on VAL + TEST-combo + TEST-range, 3 seeds
+seed: 0
+seeds: [0, 1, 2] # training seeds are the replication unit (agents/08 §4)
+prereg_tag: null # set to prereg/E4 at freeze time
+methods:
+  # Pre-registered primary comparisons (Holm-Bonferroni applies to these only).
+  - id: B1
+    train_mode: "0"
+    inference_mode: "0"
+  - id: B2
+    train_mode: pen
+    inference_mode: "0"
+    lambda: 0.1
+  - id: B3
+    train_mode: lat
+    inference_mode: lat
+    projection: {tau: 0.5, eta: 1.0e-8, K: 1, space: prob, backward: projected}
+  - id: B4a
+    train_mode: "0"
+    inference_mode: act-post
+    projection: {tau: 0.5, eta: 1.0e-8, K: 1, space: prob}
+  # Everything below is exploratory and must be reported as such.
+  - id: B1-LN
+    train_mode: "0"
+    inference_mode: "0"
+    noise_schedule: logit_normal
+    notes: exploratory — FACT noise-schedule confound
+  - id: B5
+    train_mode: "0"
+    inference_mode: bon
+    best_of_n: 8
+    notes: exploratory — selection vs gradient

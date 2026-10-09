@@ -1,0 +1,12 @@
+# Pilot evaluation (E3/G6): few episodes per cell, decisions and states recorded so
+# the projection diagnostics and E1 counterfactuals can be recomputed offline.
+eval:
+  eps_per_cell: 5
+  splits: [val]
+  max_steps: null
+  record_decisions: true
+  crn: true
+  deterministic_policy: false
+  save_states: true
+  state_save_every: 1
+  n_states_per_cell: 3

@@ -1,0 +1,48 @@
+# Smoke experiment (agents/03 §3 S6): the whole pipeline on the toy task, on CPU,
+# with no downloads. It is a *pipeline* test — its numbers mean nothing about the
+# hypothesis, and no result from this config may be reported as evidence.
+includes:
+  - ../env/toy.yaml
+  - ../model/toy.yaml
+  - ../critic/mlp_ensemble.yaml
+  - ../train/stage_b.yaml
+  - ../eval/pilot.yaml
+  - ../dynamics/ranges.yaml
+  - ../dynamics/splits.yaml
+  - ../gates.yaml
+  - ../violations.yaml
+
+name: toy_smoke
+description: CPU walking skeleton — data -> critic -> projection -> rollout -> report
+seed: 0
+seeds: [0]
+out_dir: runs
+train:
+  # Tens of steps, not thousands: this only has to exercise the code paths.
+  steps: 60
+  batch_size: 4
+  grad_accum: 1
+  save_every: 1000
+  eval_every: 1000
+critic:
+  hidden: 64
+  depth: 2
+  ensemble: 3
+  epochs: 20
+  batch_size: 64
+eval:
+  eps_per_cell: 2
+  splits: [val]
+  save_states: true
+  n_states_per_cell: 2
+methods:
+  - id: B0
+    train_mode: "0"
+    inference_mode: "0"
+  - id: B1
+    train_mode: "0"
+    inference_mode: "0"
+  - id: B3
+    train_mode: lat
+    inference_mode: lat
+    projection: {tau: 0.5, eta: 1.0e-8, K: 1, space: prob, backward: projected}

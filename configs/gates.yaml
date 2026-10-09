@@ -1,0 +1,29 @@
+# Gate thresholds (agents/11). Committed BEFORE the gate is evaluated: changing a
+# threshold after seeing a result is a protocol change and must be logged in
+# agents/research_log/LOG.md (CLAUDE.md, "When blocked").
+gates:
+  # G1 — dynamics sensitivity: can this setup test the hypothesis at all?
+  G1:
+    n_scales: 7
+    scale_lo: 0.25
+    scale_hi: 4.0
+    episodes_per_scale: 30
+    pi_base_success_band: [0.30, 0.90] # headroom in both directions
+    axis_shift_pp: 15.0 # success or violation shift across the axis range
+    min_violation_rate: 0.05 # each of V1-V5 must occur somewhere
+  # G2 — VRAM budget. The whole model choice rests on this.
+  G2:
+    budget_gb: 7.0
+    headroom_gb: 0.25
+  # G3 — critic acceptance, on VAL (held-out combos) only.
+  G3:
+    auroc: 0.85
+    auprc_mult: 2.0
+    ece: 0.05
+    fnr_at_tau: 0.15
+    min_cell_auroc: 0.75
+    require_val_disagreement_gt_train: true
+  # G6 — falsification pilot sanity.
+  G6:
+    max_fallback_rate: 0.30
+    max_action_suppression_rel: 0.25

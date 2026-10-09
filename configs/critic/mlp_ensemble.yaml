@@ -1,0 +1,22 @@
+# Deep ensemble MLP with LayerNorm (agents/06 §3). Deployable inputs only: vision
+# embeddings and privileged simulated force are OFF for any headline number, and
+# they are ablations A18 / E-critic-force.
+critic:
+  hidden: 256
+  depth: 3
+  ensemble: 5
+  lr: 0.001
+  batch_size: 512
+  epochs: 200
+  weight_decay: 0.0001
+  dropout: 0.0
+  class_weight: balanced
+  horizon: 10
+  use_vision: false
+  use_history: 1
+  privileged_force: false
+  spectral_norm: false
+  grad_norm_penalty: 0.0
+  temperature: 1.0
+  bootstrap: true
+  seed: 0

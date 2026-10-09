@@ -298,6 +298,88 @@ def test_register_discovered_sites_records_errors_without_raising(fake_model: _F
     assert "S0" not in stub.sites() and "S0f" not in stub.sites()
 
 
+# --------------------------------------------------------------------------
+# the verified lerobot-0.6.0 shape (2026-10-09)
+# --------------------------------------------------------------------------
+
+
+def _real_smolvla_tree() -> nn.Module:
+    """A synthetic tree with the *verified* SmolVLA structure and its decoys.
+
+    Reproduces what ``scripts/inspect_model.py`` walked on the real checkpoint: a
+    16-layer ``lm_expert`` (even layers self-attention, odd layers cross-attention
+    but still *named* ``self_attn``), a sibling 16-layer VLM text stack, a vision
+    encoder, and the ``action_{in,out}_proj`` pair.
+    """
+
+    class _Attn(nn.Module):
+        def __init__(self, d: int) -> None:
+            super().__init__()
+            self.q_proj = nn.Linear(d, d)
+            self.k_proj = nn.Linear(d, d)
+            self.v_proj = nn.Linear(d, d)
+            self.o_proj = nn.Linear(d, d)
+
+    class _Mlp(nn.Module):
+        def __init__(self, d: int) -> None:
+            super().__init__()
+            self.gate_proj = nn.Linear(d, d)
+            self.up_proj = nn.Linear(d, d)
+            self.down_proj = nn.Linear(d, d)
+
+    class _Block(nn.Module):
+        def __init__(self, d: int) -> None:
+            super().__init__()
+            self.self_attn = _Attn(d)
+            self.mlp = _Mlp(d)
+
+    def _stack(n: int, d: int) -> nn.ModuleList:
+        return nn.ModuleList([_Block(d) for _ in range(n)])
+
+    expert = nn.Module()
+    expert.layers = _stack(16, 8)  # type: ignore[attr-defined]
+    text_model = nn.Module()
+    text_model.layers = _stack(16, 8)  # type: ignore[attr-defined]
+    vision = nn.Module()
+    encoder = nn.Module()
+    encoder.layers = nn.ModuleList([_Attn(8) for _ in range(12)])  # type: ignore[attr-defined]
+    vision.encoder = encoder  # type: ignore[attr-defined]
+    vlm_model = nn.Module()
+    vlm_model.text_model = text_model  # type: ignore[attr-defined]
+    vlm_model.vision_model = vision  # type: ignore[attr-defined]
+    vlm = nn.Module()
+    vlm.model = vlm_model  # type: ignore[attr-defined]
+    with_expert = nn.Module()
+    with_expert.lm_expert = expert  # type: ignore[attr-defined]
+    with_expert.vlm = vlm  # type: ignore[attr-defined]
+
+    root = nn.Module()
+    root.vlm_with_expert = with_expert  # type: ignore[attr-defined]
+    root.action_in_proj = nn.Linear(8, 8)  # type: ignore[attr-defined]
+    root.action_out_proj = nn.Linear(8, 4)  # type: ignore[attr-defined]
+    root.state_proj = nn.Linear(8, 8)  # type: ignore[attr-defined]
+    return root
+
+
+def test_verified_smolvla_sites_resolve_to_the_right_family() -> None:
+    model = _real_smolvla_tree()
+    specs = {sid: SiteSpec(**vars(spec)) for sid, spec in SITE_CATALOG.items()}
+    resolved = {
+        sid: discover_modules(model, specs[sid], action_dim=4)[0]
+        for sid in ("S1", "S2", "S3", "S4", "S5", "S6")
+    }
+    assert resolved["S1"] == "action_out_proj"
+    # S2/S5: the expert MLP down-projections, NOT the identically shaped VLM text ones.
+    assert resolved["S2"] == "vlm_with_expert.lm_expert.layers.15.mlp.down_proj"
+    assert resolved["S5"] == "vlm_with_expert.lm_expert.layers.0.mlp.down_proj"
+    # S3/S4: same module path, opposite attention parity (even = self-attention).
+    assert resolved["S3"] == "vlm_with_expert.lm_expert.layers.5.self_attn.o_proj"
+    assert resolved["S4"] == "vlm_with_expert.lm_expert.layers.4.self_attn.o_proj"
+    assert resolved["S6"] == "vlm_with_expert.vlm.model.text_model.layers.15.mlp.down_proj"
+    for sid, name in resolved.items():
+        assert "vision" not in name, f"{sid} resolved into the vision encoder: {name}"
+
+
 def test_describe_match_reports_failures_as_data(fake_model: _FakeSmolVLA) -> None:
     record = sites_mod.describe_match(fake_model, SITE_CATALOG["S2"])
     assert record["resolved"] is True

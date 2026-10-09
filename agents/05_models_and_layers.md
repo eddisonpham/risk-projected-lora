@@ -10,7 +10,19 @@
 
 **Excluded:** OpenVLA (7B, discrete action tokens [V] — breaks the continuous action-gradient path); Octo (JAX, not in LeRobot [R]; not evaluated).
 
-## 2. SmolVLA anatomy (config values [V]; module names [R] → run `scripts/inspect_model.py`)
+## 2. SmolVLA anatomy (config values [V]; module names **resolved 2026-10-09**, see below)
+
+> **Resolved [V].** `scripts/inspect_model.py` (S3) ran against `lerobot/smolvla_base` with
+> LeRobot 0.6.0 and wrote `configs/model/smolvla_sites.yaml`. Verified: the action expert is
+> `model.vlm_with_expert.lm_expert` (16 blocks × 720 = 0.75·960); attention is routed by
+> **layer parity** inside a single module named `self_attn` (even = self-attention over action
+> tokens, odd = cross-attention against the frozen VLM KV, whose `k_proj`/`v_proj` are
+> re-created at the VLM's kv width 320). `model.denoise_step(prefix_pad_masks,
+> past_key_values, x_t, timestep)` is the per-denoising-step entry point; `action_out_proj`
+> maps 720 → `max_action_dim` 32, so chunks are padded to 32, not to the task's 4. Sites
+> S1–S6 resolve to: S1 `action_out_proj` (input), S2 last expert `mlp.down_proj`,
+> S3/S4 mid expert odd/even `self_attn.o_proj`, S5 first expert `mlp.down_proj`,
+> S6 VLM text `mlp.down_proj` (prefix-pass only).
 ```
 images + instruction + state → SmolVLM-2 (SigLIP + SmolLM2), first 16 layers [num_vlm_layers=16]
                                → per-layer KV (computed ONCE per chunk, reused across the 10 flow steps)
@@ -35,7 +47,7 @@ Which block parity is cross- vs. self-attention, the expert block count, and mod
 **LoRA placement P is decoupled from the site S.** Default P: r=16, α=32, dropout 0 on {q,v,o,down} of the last 4 expert blocks; S=S2. The projection formula needs only `h_c` and `g`; `h0`/`Δh` are logged when LoRA exists at the site. [H]
 
 ## 4. Flow-matching adaptation (the part the original plan did not cover)
-**Convention trap.** FACT: `a_τ=(1−τ)a0+τε`, **τ=1 is noise**, target `v*=ε−a0`, integrate τ:1→0 [V]. The SmolVLA paper writes `A^τ=τA+(1−τ)ε` [V]; the code convention is likely openpi-style (τ=1 noise) [R]. → `tests/unit/test_flow_convention.py` must assert, by construction at the first denoising step, which end is noise; define `tau_to_clean()` in exactly one place.
+**Convention trap.** FACT: `a_τ=(1−τ)a0+τε`, **τ=1 is noise**, target `v*=ε−a0`, integrate τ:1→0 [V]. The SmolVLA paper writes `A^τ=τA+(1−τ)ε` [V]; the code convention was tagged [R] and is now **verified [V] (LeRobot 0.6.0, 2026-10-09)**: `VLAFlowMatching.forward` uses `x_t = time*noise + (1-time)*actions` with target `u_t = noise - actions`, and `sample_actions` integrates `x_t += (-1/num_steps)*v_t` from `tau = 1.0`. So **τ=1 is noise**, exactly as `spec` assumed. `tests/unit/test_flow_convention.py` still pins it by construction; the algebra lives in `riskproj.policies.flow` and nowhere else.
 
 **Terminal estimate** (τ=1 noise): `â0 = x_τ − τ·v_θ(x_τ, τ; h)`. `risk_fn(h) = V_φ(c, â0(h))`, `f_act` = remainder of the expert at *this* step. Lookahead beyond one step is an ablation (`10`).
 **Where active:** only at the last m denoising steps (default m=3, i.e. τ≤0.3) [H] — at large τ, `â0` is noise-dominated and the critic is meaningless; this is also the "contact-correction regime" τ<0.2 where FACT finds training signal is starved [V]. In training, project when the sampled τ ≤ τ_proj=0.3; the loss is the flow-matching loss on the velocity computed from `h_safe`.

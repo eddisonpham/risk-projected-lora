@@ -1,0 +1,36 @@
+# E2 (G4) — is there a usable first-order region at all? Sweeps the correction step
+# size and reports r(h+u) against the linearized prediction, for both constraint
+# spaces. A conclusion of "no usable region" is a result, and it stops the project
+# at G4 rather than being patched around.
+includes:
+  - ../env/peg_insert_side.yaml
+  - ../model/smolvla.yaml
+  - ../critic/mlp_ensemble.yaml
+  - ../train/stage_b.yaml
+  - ../dynamics/ranges.yaml
+  - ../dynamics/splits.yaml
+  - ../gates.yaml
+  - ../violations.yaml
+
+name: e2_linearization
+description: linearization error vs step size, probability vs logit constraint space
+seed: 0
+seeds: [0]
+eval:
+  eps_per_cell: 10
+  splits: [val]
+  record_decisions: true
+methods:
+  # One arm is enough: the sweep axis is the *step size of each decision* (corr_rel), not
+  # an arm — the analyser reads the per-decision r_after / r_pred trace, and every
+  # decision carries its own step. K and the constraint space are A10/A13 sweeps that
+  # belong in E4's ablation matrix, not here.
+  #
+  # NOTE: an arm is resolved by ``MethodCfg.id`` through the registry, so a variant of B3
+  # (K=3, logit space) cannot be expressed as its own ``methods:`` entry until the runner
+  # has an arm-label field. See OPEN QUESTIONS in research_log/LOG.md.
+  - id: B3
+    train_mode: "0"
+    inference_mode: lat
+    projection:
+      {tau: 0.5, eta: 1.0e-8, K: 1, space: prob, backward: projected, collect_trace: true}

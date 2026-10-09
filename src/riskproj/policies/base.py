@@ -292,6 +292,17 @@ class PolicyAdapterBase:
             raise KeyError(f"site {site_id!r} already registered")
         self._sites[site_id] = module
 
+    def site_tree(self) -> Any:
+        """Root whose ``named_modules()`` names the site patterns (see the protocol).
+
+        The default is the adapter itself. An adapter that wraps the model in an
+        ``nn.Module`` attribute (``self._model``) must override this, or
+        ``scripts/inspect_model.py`` writes ``configs/model/*_sites.yaml`` with an
+        extra prefix while the adapter matches against the unwrapped tree — every
+        pattern then fails to resolve, silently, and the run falls back to heuristics.
+        """
+        return self
+
     def site_module(self, site: str) -> Any:
         if site not in self._sites:
             raise KeyError(

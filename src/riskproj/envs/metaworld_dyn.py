@@ -24,7 +24,11 @@ from typing import Any
 
 import numpy as np
 
-from riskproj.envs.dynamics import apply_dynamics, contact_friction_readback
+from riskproj.envs.dynamics import (
+    DynReadback,
+    apply_dynamics,
+    contact_friction_readback,
+)
 from riskproj.envs.state_io import restore_state, save_state
 from riskproj.envs.violations import ViolationMonitor
 from riskproj.types import DynamicsSpec, ViolationSpec
@@ -95,6 +99,54 @@ def _expert_candidates(task: str) -> list[str]:
     # dedupe, keep order
     seen: set[str] = set()
     return [c for c in out if not (c in seen or seen.add(c))]
+
+
+def build_single_env(
+    task: str,
+    *,
+    gym: Any,
+    render: bool = False,
+    camera_name: str = "topview",
+) -> tuple[Any, Any | None]:
+    """Build one Meta-World v3 env; returns ``(env, mt1_benchmark_or_None)``.
+
+    Meta-World 3.1.1 registers **only vectorized benchmark ids** (``Meta-World/MT1``
+    with an ``env_name`` kwarg, ``MT10``/``MT50``, ...); there is no
+    ``Meta-World/MT1/<task>``. The benchmark's per-task entries are populated by
+    ``metaworld.MT1(task)``, whose ``train_tasks`` carry the ``rand_vec`` a single
+    task env needs (without one ``reset_model`` asserts, since ``_freeze_rand_vec``
+    defaults to ``True``). This is exactly how LeRobot builds it
+    (``lerobot/envs/metaworld.py:_ensure_env``), which is the path ``04`` §1 names.
+
+    The benchmark object is returned so callers can pick a *different* goal per
+    episode (``train_tasks`` holds 50 of them) while staying deterministic. Older
+    installs that do register a per-task id still work through
+    :func:`resolve_gym_id`, which is tried second.
+    """
+    import metaworld
+
+    mt1: Any | None = None
+    try:
+        mt1 = metaworld.MT1(task, seed=0)
+    except Exception as exc:  # unknown task name, or a v2-only install
+        mt1_error: str = f"metaworld.MT1({task!r}): {exc!r}"
+    else:
+        cls = mt1.train_classes.get(task)
+        if cls is None:
+            mt1_error = f"metaworld.MT1({task!r}) exposes no train class for it"
+            mt1 = None
+        else:
+            kwargs: dict[str, Any] = {"camera_name": camera_name} if camera_name else {}
+            if render:
+                kwargs["render_mode"] = "rgb_array"
+            env = cls(**kwargs)
+            env.set_task(mt1.train_tasks[0])
+            return env, mt1
+    try:
+        gym_id = resolve_gym_id(task, gym)
+    except KeyError as exc:
+        raise KeyError(f"could not build a Meta-World env for {task!r}: {mt1_error}; {exc}") from exc
+    return gym.make(gym_id, **({"render_mode": "rgb_array"} if render else {})), None
 
 
 def resolve_expert_class(task: str) -> type:
@@ -224,13 +276,18 @@ class MetaWorldDynEnv:
         self._last_raw_obs: np.ndarray | None = None
         self._last_progress_m = 0.0
         self._initial_distance: float | None = None
+        #: Geom filter for force/penetration read-backs; empty until resolved.
+        self._geom_ids_cache: set[int] | None = None
+        #: Whether task_geoms.yaml gave us the critical set (vs. "all contacts").
+        self._critical_geoms_resolved = False
 
         gym, _ = _import_sim()
-        gym_id = resolve_gym_id(task, gym)
-        if render:
-            self._env = gym.make(gym_id, render_mode="rgb_array", camera_name="topview")
-        else:
-            self._env = gym.make(gym_id)
+        # A single task env needs its benchmark's ``rand_vec`` (see build_single_env), so
+        # the benchmark is kept for deterministic per-episode goal selection.
+        self._env, self._benchmark = build_single_env(
+            task, gym=gym, render=render, camera_name="topview"
+        )
+        self._select_goal()
         self._env.reset(seed=self.seed)
 
         base = self._env.unwrapped
@@ -254,7 +311,31 @@ class MetaWorldDynEnv:
 
     # -- dynamics ---------------------------------------------------------
     def _apply(self, dyn: DynamicsSpec) -> None:
-        self._readback = apply_dynamics(self._env, dyn, task_geoms=self.task_geoms)
+        try:
+            # The *wrapper* is the dynamics target: it exposes model/data (so the MuJoCo
+            # path applies) and carries the registered task id, which is what
+            # task_geoms.yaml is keyed by. The raw env reports only its class name.
+            self._readback = apply_dynamics(self, dyn, task_geoms=self.task_geoms)
+        except FileNotFoundError as exc:
+            # Discovery order matters (04 §2): scripts/inspect_contacts.py has to run the
+            # *nominal* expert before configs/env/task_geoms.yaml exists, and it builds its
+            # env through this class. A nominal spec perturbs nothing, so the honest
+            # read-back is "applied, nothing to change"; a real perturbation with no geoms
+            # must still fail, because that run would silently measure nominal physics.
+            if not dyn.is_nominal():
+                raise FileNotFoundError(
+                    f"{exc}\nrefusing to run a non-nominal DynamicsSpec before the "
+                    "task-critical geoms are discovered"
+                ) from exc
+            self._readback = DynReadback(
+                spec=dyn,
+                changed=False,
+                verified=True,
+                notes=[
+                    "configs/env/task_geoms.yaml not written yet; nominal spec touches nothing"
+                ],
+                effective={"mu_scale": 1.0, "mass_scale": 1.0, "stiff_scale": 1.0},
+            )
         self._requested_dynamics = dyn
 
     @property
@@ -281,6 +362,7 @@ class MetaWorldDynEnv:
         else:
             # idempotent re-application of the requested dynamics at reset (04 §1)
             self._apply(self._requested_dynamics)
+        self._select_goal()
         raw, info = self._env.reset(seed=self.seed)
         self._last_raw_obs = np.asarray(raw, dtype=np.float64).reshape(-1)
         self._monitor = ViolationMonitor(self.spec)
@@ -303,9 +385,12 @@ class MetaWorldDynEnv:
         eef = self._end_effector_position()
         obj = self._object_position()
         progress_m = self._progress_metres(obj)
-        step_info = {
+        # Kept and exposed: the violated-chunk labeller must consume the same mapping
+        # this monitor does, not a re-derivation from the observation (``04`` §4/§6).
+        self._last_step_info: dict[str, Any] = {
             "eef_pos": eef,
             "object_pos": obj,
+            "grip_offset": obj - eef,
             "grasped": self._is_grasped(eef, obj),
             "force": force,
             "penetration": penetration,
@@ -313,11 +398,38 @@ class MetaWorldDynEnv:
             "object_height": float(obj[2]),
             "released": bool(self._last_gripper_cmd < 0),
         }
-        self._monitor.observe(step_info)
+        self._monitor.observe(self._last_step_info)
         full_info = self._info(info, terminated=bool(terminated), truncated=bool(truncated))
+        # Everything the monitor consumed is also returned to the caller. Threshold
+        # derivation and the violated-chunk labeller both need the *measured* force /
+        # penetration / grip offset, and re-deriving them from the observation is how
+        # two different conventions for the same quantity appear (04 §4, §6).
+        for key, value in self._last_step_info.items():
+            full_info.setdefault(key, value)
         full_info["violations"] = self._monitor.per_type
         full_info["any_violation"] = self._monitor.any_violation
         return self._obs(), float(reward), bool(terminated), bool(truncated), full_info
+
+    def last_step_info(self) -> dict[str, Any]:
+        """The step-info mapping fed to this env's ``ViolationMonitor`` on the last
+        ``step`` (``04`` §6), for the violated-chunk labeller."""
+        stored = getattr(self, "_last_step_info", None)
+        if stored is None:
+            raise RuntimeError("last_step_info() called before any step()")
+        return dict(stored)
+
+    def get_obs(self) -> dict[str, Any]:
+        """The observation dict, refreshed from the **current** simulator state.
+
+        ``restore_state`` calls this after putting the sim back (``04`` §6), and the
+        contract exists so counterfactual labelling cannot build its context from a
+        stale observation captured before the restore: here the raw observation is
+        re-read from the underlying env rather than served from the cache.
+        """
+        raw_getter = getattr(self._base, "_get_obs", None)
+        if callable(raw_getter):
+            self._last_raw_obs = np.asarray(raw_getter(), dtype=np.float64).reshape(-1)
+        return self._obs()
 
     def get_state(self) -> dict[str, Any]:
         raise NotImplementedError(
@@ -328,6 +440,21 @@ class MetaWorldDynEnv:
         raise NotImplementedError(
             "MetaWorld states use restore_state(env, sim_state) (see envs.state_io)"
         )
+
+    def _select_goal(self) -> None:
+        """Set this episode's task/goal from the seed, deterministically.
+
+        Meta-World's ``MT1`` benchmark carries 50 tasks (one ``rand_vec`` each) and a
+        single task env is frozen to one of them; cycling them with a seed-derived RNG
+        is what makes episode initial states both **diverse** (needed for D-crit) and
+        **reproducible** (needed for pairing/CRN). Falls back to a no-op when the env
+        came from a plain gym id and has no benchmark attached.
+        """
+        tasks = list(getattr(self._benchmark, "train_tasks", None) or [])
+        if not tasks:
+            return
+        index = 0 if len(tasks) == 1 else int(np.random.default_rng(self.seed).integers(len(tasks)))
+        self._env.set_task(tasks[index])
 
     def save_state(self) -> Any:
         return save_state(self._env)
@@ -353,21 +480,50 @@ class MetaWorldDynEnv:
     def _base(self) -> Any:
         return self._env.unwrapped
 
+    @property
+    def unwrapped(self) -> Any:
+        """The underlying Meta-World env (gym-wrapper parity).
+
+        Scripts that audit the physics (``scripts/inspect_contacts.py``,
+        ``scripts/sensitivity_sweep.py``) reach for ``env.unwrapped.model``; without this
+        they would silently read a wrapper that has no ``model`` at all.
+        """
+        return self._base
+
+    @property
+    def model(self) -> Any:
+        return self._base.model
+
+    @property
+    def data(self) -> Any:
+        return self._base.data
+
     def _geom_ids(self) -> set[int]:
-        import mujoco
+        """Geom ids the force/penetration read-back is restricted to.
+
+        An **empty** set means "no filter" (every contact), which happens exactly when
+        ``configs/env/task_geoms.yaml`` does not exist yet: that is the discovery run
+        (``scripts/inspect_contacts.py``) and a subset would then be a guess. A real
+        perturbation run cannot get here without the file, because the dynamics
+        application fails first.
+        """
+        cached = getattr(self, "_geom_ids_cache", None)
+        if cached is not None:
+            return cached
+        from riskproj.envs.dynamics import resolve_geom_ids, task_critical_geoms
 
         model = self._base.model
         names = list((self.task_geoms or {}).get("geoms") or [])
         if not names:
-            from riskproj.envs.dynamics import task_critical_geoms
-
-            names = list(task_critical_geoms(self._env)["geoms"])
-        ids = set()
-        for name in names:
-            gid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, str(name))
-            if gid < 0:
-                raise KeyError(f"geom {name!r} from task_geoms.yaml is not in this model")
-            ids.add(int(gid))
+            try:
+                names = list(task_critical_geoms(self)["geoms"])
+            except FileNotFoundError:
+                self._critical_geoms_resolved = False
+                self._geom_ids_cache = set()
+                return self._geom_ids_cache
+        ids = set(resolve_geom_ids(model, names))
+        self._critical_geoms_resolved = True
+        self._geom_ids_cache = ids
         return ids
 
     def _contact_force_and_penetration(self) -> tuple[float, float]:
@@ -501,6 +657,14 @@ def probe_task(task: str) -> dict[str, Any]:
     gym, _ = _import_sim()
     out: dict[str, Any] = {"task": task}
     try:
+        env, bench = build_single_env(task, gym=gym)
+        out["built_via"] = "metaworld.MT1" if bench is not None else "gym.make"
+        out["action_dim"] = int(np.prod(env.action_space.shape))
+        out["n_benchmark_tasks"] = len(getattr(bench, "train_tasks", None) or [])
+        env.close()
+    except Exception as exc:
+        out["build_error"] = f"{type(exc).__name__}: {exc}"
+    try:
         out["gym_id"] = resolve_gym_id(task, gym)
     except KeyError as exc:
         out["gym_id_error"] = str(exc)
@@ -519,6 +683,7 @@ __all__ = [
     "MetaWorldDynEnv",
     "MetaWorldExpert",
     "MetaWorldTask",
+    "build_single_env",
     "probe_task",
     "resolve_expert_class",
     "resolve_gym_id",

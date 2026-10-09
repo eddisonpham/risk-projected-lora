@@ -15,8 +15,13 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
+# The repository root goes *first*: `draccus` ships an empty top-level `tests` package in
+# site-packages, and without this the local `tests.tolerances` import resolves to it.
+for entry in (str(SRC), str(ROOT)):
+    while entry in sys.path:
+        sys.path.remove(entry)
+for entry in reversed((str(SRC), str(ROOT))):
+    sys.path.insert(0, entry)
 
 # Deterministic, CPU-only by default so CI is stable.
 os.environ.setdefault("PYTHONHASHSEED", "0")

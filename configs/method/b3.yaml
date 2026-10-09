@@ -1,0 +1,17 @@
+# B3 — the method under test: activation projection at a site, during training and
+# at inference. tau / eta / K / site / margin are selected on VAL only (agents/08 §3).
+methods:
+  - id: B3
+    train_mode: lat
+    inference_mode: lat
+    projection:
+      tau: 0.5 # PLACEHOLDER: chosen on VAL by the predeclared rule (critic/calibrate.py)
+      eta: 1.0e-8
+      K: 1
+      space: prob
+      margin: 0.0
+      backward: projected
+      steps_active: 3
+      tau_proj: 0.3
+      fallback: true
+    notes: risk-guided activation projection at the default site S2

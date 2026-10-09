@@ -462,6 +462,10 @@ def generate_critic_data(
                             hist_len=hist_len,
                             use_vision=use_vision,
                             privileged_force=privileged_force,
+                            # The candidate chunk fixes the action width; deriving it here
+                            # means a caller that never passes ``action_dim`` still gets a
+                            # history block that stacks with every other row.
+                            action_dim=int(chunk.shape[-1]),
                         )
                         assert_deployable_ctx(
                             ctx, use_vision=use_vision, privileged_force=privileged_force
@@ -626,10 +630,16 @@ def _build_ctx(
     hist_len: int,
     use_vision: bool,
     privileged_force: bool,
+    action_dim: int | None = None,
 ) -> dict[str, np.ndarray]:
     """Critic context from the pre-action observation and the preceding history."""
     builder = CtxBuilder(
-        hist_len=hist_len, use_vision=use_vision, privileged_force=privileged_force
+        hist_len=hist_len,
+        use_vision=use_vision,
+        privileged_force=privileged_force,
+        # The first decision of an episode has no action history, and the block must
+        # still be padded to the real action width so every row of a shard stacks.
+        action_dim=action_dim,
     )
     for step in hist:
         builder.observe(step)
@@ -650,15 +660,26 @@ def _label_chunk(
     """Restore the state and execute the chunk open-loop for ``horizon`` steps."""
     replay.restore(state)
     monitor = monitor_factory(violation_spec)
+    # An env that maintains its own monitor exposes the mapping it fed it; prefer that
+    # over re-deriving force/penetration from the observation, where the sign and window
+    # conventions could diverge from the ones the monitor's thresholds were frozen with
+    # (``04`` §4/§6).
+    step_info_of = getattr(env, "last_step_info", None)
     labels: dict[str, bool] = dict.fromkeys(VIOLATION_TYPES, False)
     for t in range(min(horizon, chunk.shape[0])):
         action = np.asarray(chunk[t], dtype=np.float32)
         obs, _r, terminated, truncated, info = step_env(env, action)
-        payload = dict(obs)
-        payload.update(info)
+        if callable(step_info_of):
+            payload = step_info_of()
+        else:
+            # Test doubles and envs without their own monitor. A real monitor validates
+            # the required keys itself and raises when they are missing, so this path
+            # cannot silently produce a label from a half-populated mapping.
+            payload = dict(obs)
+            payload.update(info)
         payload["action"] = action
         payload["step"] = t
-        result = monitor.update(payload)
+        result = monitor.observe(payload, action=action)
         if isinstance(result, dict) and result:
             labels = _normalize_labels(result)
         if terminated or truncated:

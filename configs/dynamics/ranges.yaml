@@ -1,0 +1,30 @@
+# PLACEHOLDER level ranges, to be replaced at G1 by the dynamics-sensitivity sweep
+# (agents/04 §3, §8) and then frozen. Levels LO/MID/HI are sampled per episode
+# inside their interval; xL/xH are the extrapolation levels used only by
+# TEST-range cells. Stiffness is a scale on contact stiffness k ∝ 1/timeconst².
+dynamics:
+  ranges:
+    mu:
+      xL: [0.35, 0.5]
+      L: [0.5, 0.7]
+      M: [0.9, 1.1]
+      H: [1.4, 2.0]
+      xH: [2.4, 4.0]
+    mass:
+      xL: [0.35, 0.5]
+      L: [0.5, 0.75]
+      M: [0.9, 1.1]
+      H: [1.5, 2.5]
+      xH: [2.75, 4.0]
+    stiff:
+      xL: [0.15, 0.25]
+      L: [0.25, 0.5]
+      M: [0.75, 1.25]
+      H: [2.0, 4.0]
+      xH: [5.0, 8.0]
+  nominal:
+    mu_scale: 1.0
+    mass_scale: 1.0
+    stiff_scale: 1.0
+  apply_in_reset: true
+  verify_readback: true

@@ -1,0 +1,28 @@
+# Tier A1 (agents/05 §1). Config values are [V] from the SmolVLA paper/configs;
+# module names are [R] until scripts/inspect_model.py (smoke test S3) resolves them
+# into configs/model/smolvla_sites.yaml.
+model:
+  name: smolvla
+  checkpoint: lerobot/smolvla_base
+  chunk_size: 50
+  num_flow_steps: 10
+  num_vlm_layers: 16
+  expert_width_multiplier: 0.75
+  self_attn_every_n_layers: 2
+  train_expert_only: true
+  action_head: flow_matching
+  # Code convention is openpi-style (tau=1 is noise) [R]; tests/unit/test_flow_convention.py
+  # pins it by construction rather than by reading the code.
+  tau_convention: tau1_is_noise
+  dtype: bfloat16
+  device: auto
+  lora:
+    r: 16
+    alpha: 32
+    dropout: 0.0
+    target_suffixes: [q_proj, v_proj, o_proj, down_proj]
+    last_n_blocks: 4
+  site:
+    default: S2
+    per_token: false
+    resolved_file: configs/model/smolvla_sites.yaml

@@ -1,0 +1,39 @@
+# E1 (G5) — the pivotal falsification test, and the one that does not need a
+# closed-loop rollout to mean anything: from identical saved simulator states,
+# execute the original chunk and the corrected chunk open-loop and compare measured
+# violations pairwise. C1 is the norm-matched random-direction control: if it matches
+# B3, the correction is perturbation, not risk information.
+includes:
+  - ../env/peg_insert_side.yaml
+  - ../model/smolvla.yaml
+  - ../critic/mlp_ensemble.yaml
+  - ../train/stage_b.yaml
+  - ../eval/main.yaml
+  - ../dynamics/ranges.yaml
+  - ../dynamics/splits.yaml
+  - ../gates.yaml
+  - ../violations.yaml
+
+name: e1_counterfactual
+description: paired original-vs-corrected chunk execution from identical simulator states
+seed: 0
+seeds: [0, 1, 2]
+eval:
+  save_states: true
+  state_save_every: 1
+  n_states_per_cell: 20
+  eps_per_cell: 20
+  splits: [val, test_combo]
+methods:
+  - id: B1
+    train_mode: "0"
+    inference_mode: "0"
+  - id: B3
+    train_mode: lat
+    inference_mode: lat
+    projection: {tau: 0.5, eta: 1.0e-8, K: 1, space: prob, backward: projected}
+  - id: C1
+    train_mode: lat
+    inference_mode: lat
+    control: C1
+    projection: {tau: 0.5, K: 1, backward: projected}

@@ -1,0 +1,23 @@
+# Negative controls (agents/08 §2, ablations A1-A3). These drop into the B3 pipeline
+# with the same correction-norm budget, so if any of them matches B3 the effect is
+# perturbation, shrinkage or gating rather than critic information — and B3's claim
+# is dead. B3 is listed alongside them because the comparison is the whole point.
+methods:
+  - id: C1
+    train_mode: lat
+    inference_mode: lat
+    control: C1
+    projection: {tau: 0.5, K: 1, backward: projected}
+    notes: random direction, norm-matched to B3's corrections
+  - id: C2
+    train_mode: lat
+    inference_mode: lat
+    control: C2
+    projection: {tau: 0.5, K: 1, backward: projected}
+    notes: shrink the LoRA delta toward zero with a matched mean correction norm
+  - id: C3
+    train_mode: lat
+    inference_mode: lat
+    control: C3
+    projection: {tau: 0.5, K: 1, backward: projected}
+    notes: gradient of a critic trained on shuffled labels

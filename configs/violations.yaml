@@ -1,0 +1,18 @@
+# Violation thresholds (agents/04 §4). These MUST be derived from *nominal
+# scripted-expert rollouts only*, before any learned policy is evaluated, and then
+# frozen: `scripts/derive_violation_thresholds.py` writes the measured percentiles
+# into `provenance` below. The values here are Meta-World placeholders pending G1 —
+# the toy task carries its own, separately documented spec (envs/toy.py).
+violations:
+  slip_drift: 0.02 # V1, metres of gripper-frame drift within `window` steps
+  drop_dist: 0.03 # V2, metres the object leaves the gripper-frame offset by
+  force_max: 60.0 # V3, newtons summed over task-critical contact pairs
+  penetration: 0.005 # V4, metres of absolute depth (stiffness-independent)
+  jam_force: 40.0 # V5, newtons sustained without progress
+  jam_progress_eps: 0.002 # V5, metres of progress that counts as "moving"
+  jam_steps: 5 # V5, W consecutive steps
+  window: 10 # steps for the V1/V2 windows
+  horizon: 10 # H_c; must equal env.critic_horizon (asserted)
+  provenance:
+    status: placeholder
+    derivation: "nominal scripted-expert 99.5th percentile x margin; not yet run"

@@ -143,7 +143,9 @@ class StubMonitor:
         self.counts = dict.fromkeys(VIOLATION_TYPES, 0)
         self.first = dict.fromkeys(VIOLATION_TYPES, -1)
 
-    def update(self, info: dict[str, Any]) -> dict[str, Any]:
+    def observe(self, info: dict[str, Any], *, action: Any = None) -> dict[str, Any]:
+        """Mirrors ``ViolationMonitor.observe`` (the real monitor's API), which is what
+        the labeller calls; ``action`` is accepted and unused, as in the real one."""
         if self.never:
             return dict(self.counts)
         force = float(np.asarray(info.get("force", [0.0]), dtype=np.float32).sum())

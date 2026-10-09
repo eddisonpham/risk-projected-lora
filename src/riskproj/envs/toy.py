@@ -272,16 +272,42 @@ class ToyEnv:
         }
 
     def effective_dynamics(self) -> dict[str, Any]:
+        """Effective physics in the read-back schema of ``envs/dynamics.py``.
+
+        Every axis carries a ``scale`` entry (a multiplier of the nominal value) so
+        a caller can compare the *achieved* scale with the requested spec without
+        knowing this environment's internals -- that comparison is what makes a
+        silent dynamics no-op detectable (``04`` §2). The physical quantities are
+        kept alongside for inspection.
+        """
         timeconst = 1.0 / math.sqrt(self._scales.stiff_scale)
         return {
-            "mu": {"grip_contact": self._mu, "table": self._mu},
-            "mass": {"object": float(self._scales.mass_scale)},
+            "mu": {"scale": self._mu, "grip_contact": self._mu, "table": self._mu},
+            "mass": {
+                "scale": float(self._scales.mass_scale),
+                "object": float(self._scales.mass_scale),
+            },
+            "stiff": {"scale": float(self._scales.stiff_scale), "timeconst": timeconst},
             "solref": {"contact": (timeconst, 1.0)},
             "effective": self._scales.as_dict(),
             "changed": not self._scales.is_nominal(),
             "verified": True,
             "notes": [],
         }
+
+    @property
+    def dyn_readback(self) -> dict[str, Any]:
+        """Read-back as ``data.gen_demos.readback_dict`` expects it (``04`` §2)."""
+        return self.effective_dynamics()
+
+    def close(self) -> None:
+        """gymnasium-style no-op: the toy env owns no external resources.
+
+        It exists because the rollout driver closes environments uniformly, and a
+        missing ``close`` would otherwise surface as an ``AttributeError`` at the
+        end of an otherwise successful episode.
+        """
+        return None
 
     @property
     def requested_dynamics(self) -> DynamicsSpec:
@@ -418,21 +444,23 @@ class ToyEnv:
 
         info = self._info(terminated=terminated, truncated=truncated)
         obs = self._obs()
-        self._monitor.observe(
-            {
-                "eef_pos": st.p,
-                "object_pos": st.q,
-                "grasped": st.grasped,
-                "force": force,
-                "penetration": penetration,
-                "progress_m": st.progress_m,
-                "grip_offset": st.grip_offset.copy(),
-                "grasp_established": st.grasped,
-                "released": False,  # the toy grip is never opened deliberately
-                "object_height": float(st.q[2]),
-                "progress": info["progress"],
-            }
-        )
+        # Built once and kept: the violated-chunk labeller must consume the *same*
+        # mapping this monitor does, so the violation conventions (signs, windows, grip
+        # bookkeeping) live in exactly one place (`04` §4/§6).
+        self._last_step_info: dict[str, Any] = {
+            "eef_pos": st.p,
+            "object_pos": st.q,
+            "grasped": st.grasped,
+            "force": force,
+            "penetration": penetration,
+            "progress_m": st.progress_m,
+            "grip_offset": st.grip_offset.copy(),
+            "grasp_established": st.grasped,
+            "released": False,  # the toy grip is never opened deliberately
+            "object_height": float(st.q[2]),
+            "progress": info["progress"],
+        }
+        self._monitor.observe(self._last_step_info)
         info["violations"] = self._monitor.per_type
         info["any_violation"] = self._monitor.any_violation
         return obs, -distance, terminated, truncated, info
@@ -494,6 +522,27 @@ class ToyEnv:
                 "dists": [-float(self._last_penetration)] if self._last_penetration > 0 else [],
             },
         }
+
+    def get_obs(self) -> dict[str, Any]:
+        """Public observation getter, for the ``state_io`` restore contract.
+
+        ``restore_state`` refreshes the observation through a *named* getter
+        (``get_obs``/``_get_obs``/``observe``/``get_observation``) so that
+        counterfactual labels are built from the restored state rather than a stale
+        observation (``04`` §6). ``_obs`` is private, so this is the alias it looks for.
+        """
+        return self._obs()
+
+    def last_step_info(self) -> dict[str, Any]:
+        """The step-info mapping this env fed its own ``ViolationMonitor`` on the last
+        ``step`` (``04`` §6). The violated-chunk labeller consumes this instead of
+        re-deriving contact/force quantities from the observation, where the sign and
+        window conventions could silently diverge from the ones the monitor was
+        validated with."""
+        stored = getattr(self, "_last_step_info", None)
+        if stored is None:
+            raise RuntimeError("last_step_info() called before any step()")
+        return dict(stored)
 
     def _info(self, *, terminated: bool, truncated: bool) -> dict[str, Any]:
         st = self._state
@@ -673,6 +722,14 @@ class ToyExpert:
         if norm > cap and norm > 0:
             delta = delta * (cap / norm)
         return delta.astype(np.float32)
+
+    def __call__(self, obs: dict[str, Any]) -> np.ndarray:
+        """``Task.expert()`` returns a *callable* ``expert(obs) -> [A]`` (``04`` §7).
+
+        The controller is an object because it carries phase state, so the callable
+        form the demos generator uses is an alias for :meth:`act`.
+        """
+        return self.act(obs)
 
     def act(self, obs: dict[str, Any]) -> np.ndarray:
         ph = self.physics

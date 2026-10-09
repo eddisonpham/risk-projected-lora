@@ -1,0 +1,31 @@
+{
+  "entries": {
+    "runs/_smoke/s6/critic/tuples_0000.npz": {
+      "bytes": 3624,
+      "config_hash": "5ed0d2a1",
+      "generator": "gen_critic_data",
+      "generator_version": "0.1.0",
+      "kind": "critic_tuples",
+      "n_records": 16,
+      "path": "runs/_smoke/s6/critic/tuples_0000.npz",
+      "recorded_at": "2026-10-09T23:10:54Z",
+      "sha256": "3c0d83c84809c117e356615d2709156b4a1dc8e2d8407fdd989287cb4011ddb7",
+      "shard": 0
+    },
+    "runs/_smoke/s6/demos/demos.npz": {
+      "bytes": 3595,
+      "cells": [
+        "L-M-M",
+        "M-L-M"
+      ],
+      "config_hash": "5ed0d2a1",
+      "generator": "gen_demos",
+      "generator_version": "0.1.0",
+      "kind": "demos",
+      "n_records": 3,
+      "path": "runs/_smoke/s6/demos/demos.npz",
+      "recorded_at": "2026-10-09T23:10:54Z",
+      "sha256": "91dc977c4ee8867269be5335fcb5194ce580f481977716d1353ee0f72e0c884a"
+    }
+  }
+}

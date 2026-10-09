@@ -1,0 +1,21 @@
+# Mechanism testbed, not a baseline (agents/05 §1). The toy policy has a single
+# expert block, so the S1/S2 sites coincide and the depth sweep A9 is degenerate
+# on it — that ablation needs SmolVLA.
+model:
+  name: toy
+  checkpoint: null
+  chunk_size: 10
+  num_flow_steps: 10
+  action_head: flow_matching
+  tau_convention: tau1_is_noise
+  dtype: float32
+  device: cpu
+  lora:
+    r: 4
+    alpha: 8
+    dropout: 0.0
+    target_suffixes: [proj]
+    last_n_blocks: 1
+  site:
+    default: S2
+    per_token: false

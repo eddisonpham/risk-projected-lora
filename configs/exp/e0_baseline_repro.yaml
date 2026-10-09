@@ -1,0 +1,34 @@
+# E0 (agents/11 P2) — reproduce the baseline before measuring anything new.
+# Two questions: does pi_base reach the nominal-success band (G1), and does
+# exec_horizon=10 lose success versus re-planning every step? If the second answer
+# is "yes, it loses", the protocol changes before any method is compared.
+includes:
+  - ../env/peg_insert_side.yaml
+  - ../model/smolvla.yaml
+  - ../critic/mlp_ensemble.yaml
+  - ../train/stage_a.yaml
+  - ../dynamics/ranges.yaml
+  - ../dynamics/splits.yaml
+  - ../gates.yaml
+  - ../violations.yaml
+
+name: e0_baseline_repro
+description: Stage-A SFT and the exec_horizon 10-vs-1 comparison at nominal dynamics
+seed: 0
+seeds: [0, 1, 2]
+eval:
+  eps_per_cell: 40
+  splits: [val]
+  record_decisions: false
+methods:
+  - id: B0
+    train_mode: "0"
+    inference_mode: "0"
+    notes: frozen Stage-A policy, exec_horizon 10
+# The second E0 question — exec_horizon 10 vs 1 (re-plan every step) — is deliberately
+# NOT an arm here. An arm is resolved by ``MethodCfg.id`` through the method registry,
+# and both sides of that comparison are the same method (B0); the difference lives in
+# ``RolloutSpec.exec_horizon`` (eval/rollout.py), which no config field can currently
+# express. Until the runner exposes it, E0 answers only its first question. Logged as an
+# OPEN QUESTION in research_log/LOG.md — a comparison that silently is not run is worse
+# than one that is explicitly deferred.

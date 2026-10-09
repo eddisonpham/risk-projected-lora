@@ -11,7 +11,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from torch import Tensor
+from torch import Tensor, nn
 
 from riskproj.types import DynamicsSpec, PolicyOut, ProjectionInfo, ViolationSpec
 
@@ -31,6 +31,16 @@ class PolicyAdapter(Protocol):
 
     def sites(self) -> dict[str, Any]:
         """Named activation sites: site id -> module (or a documented hook handle)."""
+
+    def site_tree(self) -> nn.Module:
+        """The ``nn.Module`` whose ``named_modules()`` names the site patterns.
+
+        One namespace, used by both the discovery script (which *writes*
+        ``configs/model/<model>_sites.yaml``) and the adapter (which resolves those
+        patterns at load time). An adapter that wraps the policy (the adapter is an
+        ``nn.Module`` holding it as ``self._model``) must return the *wrapped* object,
+        or the file comes out with an extra prefix and nothing resolves.
+        """
 
     def attach_lora(self, cfg: Any) -> int:
         """Attach LoRA at the configured placement; returns number of adapted modules."""
