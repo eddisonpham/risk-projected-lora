@@ -183,7 +183,100 @@ adapter still needs the chunk-level prefix/KV plumbing (`embed_prefix` + `vlm_wi
 fill_kv_cache=True)`) before `tail_velocity` can run at all — that is the next implementation slice,
 and it is a prerequisite for Stage A (`P2`).
 
-### OPEN QUESTIONS (updated)
+### 2026-10-09 — iteration 1 — G1 prerequisites: violation thresholds derived and frozen; expert-only sensitivity pilot
+**Loop stage:** 6 run → 7 analyze. The first entry with *simulator numbers*, and all of them are about
+the **measurement apparatus** (can this task move when the physics moves, and can the failure events
+be seen at all?) — none of them is evidence for or against the projection hypothesis. No learned
+policy has been evaluated on this task.
+
+**What was done.** (1) Derived the violation thresholds from **nominal scripted-expert rollouts only**
+(50 episodes, 10 000 steps; `scripts/derive_violation_thresholds.py`, record in
+`configs/violations_derived.yaml`) and **froze** them into `configs/violations.yaml` with provenance
+(percentile 99.5, margins V1/V2/V3/V5 = 1.5, V4 = 1.0, `learned_checkpoint_in_loop: false`).
+(2) Ran the sensitivity sweep as an **expert-only pilot** (5 log-spaced scales per axis, 8 episodes
+per scale, 208 s) — explicitly *not* a gate evaluation, since the π_base band criterion cannot be
+evaluated before Stage A exists.
+
+**Frozen thresholds (and what they mean).**
+
+| Event | Quantity at nominal (99.5 pct) | Frozen threshold |
+|---|---|---|
+| V1 slip | gripper-frame offset drift | 0.1225 m |
+| V2 drop | object–eef distance while grasped | 0.0840 m |
+| V3 over-force | Σ normal force over task-critical geoms | 5970.9 N |
+| V4 penetration | max contact depth (absolute) | 0.00804 m |
+| V5 jam | sustained force without progress | 5970.9 N |
+
+**Results (expert, 5 scales × 8 episodes, `runs/_g1/sensitivity_pilot.json`).**
+
+| Axis | success at 0.25× → 4× | max shift | V4 rate across scales |
+|---|---|---|---|
+| friction μ | 0.75 → 0.75 (peak 1.00 at 0.5×) | 25 pp | 0.75 0.50 0.62 0.88 0.62 |
+| mass m | 0.75 → 0.50 (0.88 at 1×) | **37.5 pp** | 0.88 0.88 0.62 0.00 0.00 |
+| stiffness k | 0.75 → 0.62 (1.00 at 0.5×) | 25 pp | 1.00 1.00 0.62 0.00 0.00 |
+
+**Analysis.**
+- **The task is sensitive enough in the sense that matters for the *task* choice:** mass and stiffness
+  move scripted-expert success by ≥ 25–37 pp across [0.25×, 4×], and the read-backs confirm the
+  physics really changed at every off-nominal scale (μ ∈ {0.25…4} verified). The `axis_shift` and
+  `readback_confirms_physics` criteria now pass on the expert alone.
+- **The failure events as specified are not measurable from nominal data.** V1, V2, V3 and V5 fire in
+  **0.00** of episodes at every scale, while V4 fires in 50–100 % and *anti*-correlates with the axes
+  (0.88 at m = 0.25 → 0.00 at m = 4). The cause is visible in the derivation: the 99.5th percentile of
+  each quantity is set by **legitimate manipulation**, not by failure. The peg slides ~0.12 m inside the
+  gripper frame and the aperture while being inserted, so a 12 cm "drift" is nominal; MuJoCo reports
+  multi-kN normal forces for the peg–aperture contacts at nominal dynamics, so "over-force" at 5971 N
+  is unreachable; and an absolute penetration bar of 8.04 mm (the nominal 99.5 pct) is simultaneously
+  *too low* (V4 fires almost always) and physically inverted (harder/stiffer contacts seat the peg
+  with less penetration).
+- **Two reporter defects were found and fixed** (neither is a physics result): the sweep dropped the
+  `DynReadback` dataclass and reported `nan` for every off-nominal read-back — i.e. it *failed* the
+  physics criterion because it could not read its own record; and the smoke `S1` detail line reported
+  `success=False` for every rollout (it read an attribute the env does not have; the value lives in
+  the step info). Re-running μ after the fix yields "every off-nominal scale read back correctly".
+
+**Claim-ladder rung: none.** This iteration produced no claim about the method. What it produced is a
+*negative result about the measurement protocol*: with the definitions in `04` §4 and the
+nominal-percentile rule, four of the five violation events cannot occur, and the fifth is a near-
+constant that moves the wrong way. Per `04` §4 the labels are the critic's training target, so
+carrying this forward would train a critic on a constant.
+
+**Reflection (prior updates).** The G1 band criterion is **not yet evaluable** (needs Stage A); the
+violation-coverage criterion currently **fails**. Note what this does *not* license: `11` says "G1 fail
+→ switch task", but the task itself does move success by ≥ 25 pp, so the failure is in the *event
+definitions*, not (yet) in the task — and per `CLAUDE.md` a threshold change is a protocol change that
+must be decided conservatively, on nominal/expert data, and logged. Since no learned policy has run on
+this task, revising the definitions now is in-order rather than post hoc.
+
+**Candidate revisions to decide (must be recorded before any policy evaluation).**
+1. **V3/V5 force:** use the **per-pair maximum** (or a low-pass filtered wrench) instead of the sum
+   over all task-critical geoms — the sum is dominated by the stiff peg–aperture mesh contact and
+   scales with stiffness, which also confounds it with the stiffness axis (the very confound that V4
+   was designed to avoid).
+2. **V1 slip:** measure drift relative to the **established grasp pose of this episode's closed
+   gripper** (or relative to the object's pose *in the aperture*), not the raw object–eef offset.
+3. **V4 penetration:** keep it absolute but re-derive with a floor that is not a 99.5th-percentile
+   near-constant, and check its sign against the axis (an event whose rate *falls* with harder
+   dynamics is not a failure signature); if it cannot be made monotone, demote it to a diagnostic.
+4. **V2 drop:** believed sound in construction (window cleared at each new grasp, intentional releases
+   excluded) but unreachable at 0.084 m; it needs an *induced* failure (a perturbed chunk) to
+   calibrate against, not more nominal episodes.
+5. Budget one **backup task** check (`assembly-v3` or `hand-insert-v3`) with the *same* derived-rule
+   procedure before choosing between "revise events" and "switch task" — the spec's backup list
+exists for exactly this fork.
+
+**Next 1–3 actions.** (1) Revise the event definitions per the list above, re-derive on nominal
+rollouts, and re-run the expert-only sweep — the coverage criterion is the thing being fixed.
+(2) G2 on the real model config (`scripts/profile_vram.py` with `configs/model/smolvla.yaml`), which
+is independent of the above and is the next hard constraint (7 GB of a 7.96 GB card). (3) The SmolVLA
+chunk-level prefix/KV plumbing (`embed_prefix` + `vlm_with_expert.forward(fill_kv_cache=True)`) that
+`tail_velocity` needs before Stage A can exist.
+
+**OPEN QUESTIONS.** Two new ones (13: the end-effector frame V1/V2 measure against; 14: which force
+"over-force" means) are appended to the consolidated list below along with 9–12 from the previous
+iteration.
+
+### OPEN QUESTIONS (consolidated; append-only, never renumbered)
 9. **S0 provisioning.** `lerobot` 0.6.0 is installed with the `dataset` extra; S0 is blocked by the
    `smolvla_base` *checkpoint revision* (pre-processor-format) and needs a fresh download.
 10. **Submodules vs PyPI pins.** `third_party/lerobot` and `third_party/Metaworld` do not exist; the
@@ -195,3 +288,11 @@ and it is a prerequisite for Stage A (`P2`).
 12. **Probe/adapter action dim.** SmolVLA's chunk lives padded to `max_action_dim` (32) while the task
    has 4; the adapter's `action_dim` must be decided before Stage A (the site→action path, the critic
    horizon and `f_act` all assume one width).
+13. **End-effector frame for V1/V2.** The derived nominal drift (0.12 m) suggests the object–eef offset
+   is dominated by the peg's motion relative to `tcp_center` rather than by slip. If the gripper holds
+   the peg at a fixed pose, a *held-pose-relative* drift is the measurable quantity; settle it before
+   any critic labels are regenerated (A17/A20 in `10`).
+14. **Which force is "over-force"?** `mj_contactForce`'s normal component on a thin-box/mesh contact is
+   a stiff-spring impulse (multi-kN at nominal), so the summed form is unreachable and stiffness-
+   confounded. Per-pair max vs. filtered wrench vs. grip actuation force are three different events;
+   pick one with evidence that it is monotone in the axes.

@@ -1,0 +1,28 @@
+violations:
+  drop_dist: 0.08398810965177543
+  force_max: 5970.914498238458
+  horizon: 10
+  jam_force: 5970.914498238458
+  jam_progress_eps: 0.002
+  jam_steps: 5
+  penetration: 0.008040351478902833
+  provenance:
+    config_hash: 64bb60e1
+    generator: scripts/derive_violation_thresholds.py
+    generator_version: 1
+    git_sha: dfb725eb07b0b3a839e77d32d953e075c0f428a4
+    learned_checkpoint_in_loop: false
+    margin:
+      V1: 1.5
+      V2: 1.5
+      V3: 1.5
+      V4: 1.0
+      V5: 1.5
+    n_episodes: 50
+    n_steps: 10000
+    percentile: 99.5
+    source: scripted expert, nominal dynamics, nominal cell ONLY
+    status: derived
+    v4_is_absolute_depth: true
+  slip_drift: 0.12252672357537742
+  window: 10

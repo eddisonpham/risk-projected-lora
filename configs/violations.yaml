@@ -1,18 +1,37 @@
-# Violation thresholds (agents/04 §4). These MUST be derived from *nominal
-# scripted-expert rollouts only*, before any learned policy is evaluated, and then
-# frozen: `scripts/derive_violation_thresholds.py` writes the measured percentiles
-# into `provenance` below. The values here are Meta-World placeholders pending G1 —
-# the toy task carries its own, separately documented spec (envs/toy.py).
+# Violation thresholds (agents/04 §4). Derived from *nominal scripted-expert rollouts
+# only*, before any learned policy is evaluated, and then frozen. Written by
+# `scripts/derive_violation_thresholds.py` (full record: configs/violations_derived.yaml).
+# The toy task carries its own, separately documented spec (envs/toy.py).
+#
+# READ BEFORE USING: the derived values below are the nominal 99.5th percentile x margin,
+# and on peg-insert-side-v3 several of the underlying quantities are *dominated by
+# legitimate manipulation* rather than by failure — the peg slides ~0.12 m in the
+# gripper frame while being inserted, and MuJoCo reports multi-kN normal forces for the
+# peg-aperture contacts at nominal dynamics. Whether V1-V5 remain reachable at all is
+# exactly what G1's violation-coverage criterion measures; if it fails, the event
+# *definitions* (per-pair instead of summed force; drift relative to a held pose instead
+# of the raw gripper offset) must be revised on nominal data before any policy runs.
 violations:
-  slip_drift: 0.02 # V1, metres of gripper-frame drift within `window` steps
-  drop_dist: 0.03 # V2, metres the object leaves the gripper-frame offset by
-  force_max: 60.0 # V3, newtons summed over task-critical contact pairs
-  penetration: 0.005 # V4, metres of absolute depth (stiffness-independent)
-  jam_force: 40.0 # V5, newtons sustained without progress
+  slip_drift: 0.12252672357537742 # V1, metres of gripper-frame drift within `window` steps
+  drop_dist: 0.08398810965177543 # V2, metres the object leaves the gripper-frame offset by
+  force_max: 5970.914498238458 # V3, newtons summed over task-critical contact pairs
+  penetration: 0.008040351478902833 # V4, metres of absolute depth (stiffness-independent)
+  jam_force: 5970.914498238458 # V5, newtons sustained without progress
   jam_progress_eps: 0.002 # V5, metres of progress that counts as "moving"
   jam_steps: 5 # V5, W consecutive steps
   window: 10 # steps for the V1/V2 windows
   horizon: 10 # H_c; must equal env.critic_horizon (asserted)
   provenance:
-    status: placeholder
-    derivation: "nominal scripted-expert 99.5th percentile x margin; not yet run"
+    status: derived
+    generator: scripts/derive_violation_thresholds.py
+    generator_version: 1
+    source: scripted expert, nominal dynamics, nominal cell ONLY
+    n_episodes: 50
+    n_steps: 10000
+    percentile: 99.5
+    margin: { V1: 1.5, V2: 1.5, V3: 1.5, V4: 1.0, V5: 1.5 }
+    v4_is_absolute_depth: true
+    learned_checkpoint_in_loop: false
+    config_hash: 64bb60e1
+    git_sha: dfb725eb07b0b3a839e77d32d953e075c0f428a4
+    derived_on: "2026-10-09 (before any learned policy was evaluated on this task)"

@@ -45,7 +45,12 @@ def _episode(task: Any, spec: Any, actor: Any, *, seed: int, max_steps: int) -> 
             break
     summary = env.episode_summary() if hasattr(env, "episode_summary") else {}
     violations = summary.get("violations", info.get("violations", {}))
+    # ``dyn_readback`` is a DynReadback dataclass, not a mapping; dropping it here made the
+    # G1 read-back criterion report `nan` for every off-nominal scale — a *fail* caused by
+    # the reporter rather than by the physics.
     rb = getattr(env, "dyn_readback", None)
+    if rb is not None and hasattr(rb, "as_dict"):
+        rb = rb.as_dict()
     return {
         "success": bool(summary.get("success", info.get("success", False))),
         "steps": steps,
