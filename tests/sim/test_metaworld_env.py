@@ -118,6 +118,42 @@ def test_s2_state_restore_reproduces_twenty_steps(task: MetaWorldTask) -> None:
         env.close()
 
 
+def test_episode_truncates_at_the_wrapper_budget(task: MetaWorldTask) -> None:
+    """The wrapper must enforce ``max_episode_steps`` itself.
+
+    Meta-World's own env reported ``truncated=False`` after 200 steps, so a consumer that
+    trusted that flag saw a stuck episode as ``failure_class="none"`` — a silent outcome.
+    The toy env truncates at its budget; this one has to as well.
+    """
+    budget = 25
+    env = task.make_env(DynamicsSpec(), seed=0, max_steps=budget)
+    try:
+        assert env.max_episode_steps == budget
+        obs, _ = env.reset(seed=0)
+        truncated_flags: list[bool] = []
+        for _ in range(budget + 5):
+            # A fixed action: it must not accidentally solve the task and terminate early.
+            obs, _r, terminated, truncated, _info = env.step(ACTION)
+            truncated_flags.append(bool(truncated))
+            if terminated or truncated:
+                break
+        assert truncated_flags[-1] is True, (
+            f"the episode ran {len(truncated_flags)} steps of a {budget}-step budget without "
+            "reporting truncation"
+        )
+        assert len(truncated_flags) == budget, (
+            f"truncation must land exactly on the budget, got {len(truncated_flags)} steps"
+        )
+        assert not any(truncated_flags[:-1]), "an episode must not truncate before its budget"
+
+        # And the counter must restart, or episode 2 would truncate immediately.
+        obs, _ = env.reset(seed=1)
+        obs, _r, terminated, truncated, _info = env.step(ACTION)
+        assert not (terminated or truncated), "a reset must clear the step counter"
+    finally:
+        env.close()
+
+
 def test_grasp_is_contact_and_force_is_the_largest_pair(task: MetaWorldTask) -> None:
     """The two read-backs V1/V3/V5 consume, measured on the real model.
 

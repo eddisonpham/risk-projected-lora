@@ -471,6 +471,12 @@ network; only LeRobot's own eval driver is (OPEN QUESTION 9).
    "budget exhausted" signal does not exist. No current caller depends on it (they all count for
    themselves), but it silently mislabels any future consumer. Fix in its own change: it alters
    episode lengths, so it needs its own before/after comparison.
+   *Resolved (same iteration):* the wrapper now counts its own steps and truncates at its budget,
+   like the toy env already did, and a sim test pins both the landing step and the counter reset.
+   Before/after comparison run with the identical smoke-sweep command: success 0.50/0.00/0.00 and
+   per-type rates `V2 0.5` / `V2 0.5, V4 0.5` byte-identical, i.e. no measured behaviour changed
+   (every existing caller's loop budget already equalled the env's, which is why nothing depended
+   on the missing flag).*
 16. **V1 and V4 are out-of-envelope detectors, not failure signatures.** V1's quantity is dominated by
    the peg slide that the insertion itself requires (83 mm at nominal), and V4 fires on *softer* than
    nominal contacts (14.8 mm at stiff 0.25, 9.2 mm at 1.0, 4.4 mm at 4.0). If either is kept, every

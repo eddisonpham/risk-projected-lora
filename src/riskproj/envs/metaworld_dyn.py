@@ -294,6 +294,8 @@ class MetaWorldDynEnv:
         self._last_raw_obs: np.ndarray | None = None
         self._last_progress_m = 0.0
         self._initial_distance: float | None = None
+        #: Steps taken in the current episode, for the wrapper's own truncation.
+        self._episode_steps = 0
         #: Geom filter for force/penetration read-backs; empty until resolved.
         self._geom_ids_cache: set[int] | None = None
         #: Whether task_geoms.yaml gave us the critical set (vs. "all contacts").
@@ -391,6 +393,7 @@ class MetaWorldDynEnv:
         self._last_gripper_cmd = 1.0
         self._last_progress_m = 0.0
         self._initial_distance = None
+        self._episode_steps = 0
         obs = self._obs()
         return obs, self._info(info, terminated=False, truncated=False)
 
@@ -402,6 +405,12 @@ class MetaWorldDynEnv:
             self._last_gripper_cmd = float(a[3])
         raw, reward, terminated, truncated, info = self._env.step(a)
         self._last_raw_obs = np.asarray(raw, dtype=np.float64).reshape(-1)
+        # Enforce our own budget, like the toy env does. The wrapped env does not
+        # necessarily truncate at ``max_episode_steps`` (measured: it reported
+        # ``truncated=False`` after 200 steps), and a consumer that trusted the flag
+        # labelled a stuck episode as ``failure_class="none"`` -- a silent outcome.
+        self._episode_steps += 1
+        truncated = bool(truncated) or self._episode_steps >= self.max_episode_steps
 
         force_pairs, penetration = self._contact_forces_and_penetration()
         eef = self._end_effector_position()
