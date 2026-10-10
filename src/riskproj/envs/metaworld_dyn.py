@@ -412,7 +412,9 @@ class MetaWorldDynEnv:
         self._episode_steps += 1
         truncated = bool(truncated) or self._episode_steps >= self.max_episode_steps
 
-        force_pairs, penetration = self._contact_forces_and_penetration()
+        force_pairs, penetration, force_pairs_all, penetration_all = (
+            self._contact_forces_and_penetration()
+        )
         eef = self._end_effector_position()
         obj = self._object_position()
         progress_m = self._progress_metres(obj)
@@ -429,7 +431,10 @@ class MetaWorldDynEnv:
             "force": max(force_pairs) if force_pairs else 0.0,
             "force_pairs": tuple(force_pairs),
             "force_sum": float(sum(force_pairs)),
+            "force_pairs_all": tuple(force_pairs_all),
             "penetration": penetration,
+            "penetration_all": penetration_all,
+            "contact_family": "manipulation (grasp pair excluded)",
             "progress_m": progress_m,
             "object_height": float(obj[2]),
             "released": bool(self._last_gripper_cmd < 0),
@@ -562,28 +567,47 @@ class MetaWorldDynEnv:
         self._geom_ids_cache = ids
         return ids
 
-    def _contact_forces_and_penetration(self) -> tuple[list[float], float]:
-        """Per-pair normal forces and max penetration over task-critical contacts.
+    def _contact_forces_and_penetration(
+        self,
+    ) -> tuple[list[float], float, list[float], float]:
+        """Normal forces and penetration per contact, split by family.
 
-        Returns the ``|normal|`` of every task-critical contact pair (the quantity the
-        caller reduces to a per-pair maximum) plus the deepest absolute penetration.
+        Returns ``(manipulation forces, manipulation penetration, all forces, all
+        penetration)``. The **grasp** family (a gripper geom against the manipulated
+        object) is excluded from the manipulation values because it measures how the
+        gripper holds things, not what the task does to them: at nominal dynamics the pads
+        indent into the peg by 8.6 mm and carry ~0.4 kN, so a V4 bar derived over all
+        contacts (0.0092 m) sits inside every good episode, while one derived over
+        manipulation contacts only (0.0026 m) describes the peg pressing into the fixture —
+        which is the event V3/V4/V5 are actually about. Both families are returned so a
+        reader can see which one drove a threshold.
         """
         import mujoco
 
         data = self._base.data
         critical = self._geom_ids()
-        forces: list[float] = []
-        penetration = 0.0
+        groups = self._grasp_geom_groups()
+        gripper, target = groups if groups is not None else (set(), set())
+        manip_forces: list[float] = []
+        all_forces: list[float] = []
+        manip_pen = 0.0
+        all_pen = 0.0
         buf = np.zeros(6, dtype=np.float64)
         for i in range(int(data.ncon)):
             c = data.contact[i]
-            if critical and not ({int(c.geom1), int(c.geom2)} & critical):
+            pair = {int(c.geom1), int(c.geom2)}
+            if critical and not (pair & critical):
                 continue
             mujoco.mj_contactForce(self._base.model, data, i, buf)
-            forces.append(float(abs(buf[0])))
-            if c.dist < 0:
-                penetration = max(penetration, float(-c.dist))
-        return forces, penetration
+            force = float(abs(buf[0]))
+            depth = max(0.0, float(-c.dist))
+            all_forces.append(force)
+            all_pen = max(all_pen, depth)
+            is_grasp = bool(pair & gripper) and bool(pair & target)
+            if not is_grasp:
+                manip_forces.append(force)
+                manip_pen = max(manip_pen, depth)
+        return manip_forces, manip_pen, all_forces, all_pen
 
     def _grasp_geom_groups(self) -> tuple[set[int], set[int]] | None:
         """``(gripper geoms, object geoms)`` from ``task_geoms.yaml``, or ``None``.

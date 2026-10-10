@@ -415,6 +415,62 @@ never runs. Next step for G2 is to wire the eval layer's observation batch into 
 weights, all 16 VLM layers) while the Hub is unreachable — so P2/Stage A are not blocked by the
 network; only LeRobot's own eval driver is (OPEN QUESTION 9).
 
+## Iteration 10 — methodology audit: three of my own measurements were wrong
+
+Prompted by a review request ("why does it fail?"), I audited the measurement chain rather than
+re-arguing from the previous conclusions. Three errors, all mine, all now fixed and measured:
+
+**Error 1 — the thresholds were derived from a *different quantity* than the monitor computes.**
+`configs/violations.yaml` was frozen while the env still fell back to the **distance** grasp test
+(the gripper/object groups did not resolve for envs built by `build_task`, which the file fallback
+fix came later and silently repaired). So V1's "slip" was the arm's approach motion: 0.0826 m, and
+the bar became 0.1239 m. Under the contact test the same quantity measures **0.0135 m** (50 nominal
+expert episodes) — a bar 6x too high, which is why V1 read 0.000 in every sweep while the code
+looked correct. Nothing in the pipeline could notice: the derivation recorded no grasp semantics.
+*Fix:* the derivation now records `provenance.grasp_test` / `contact_family` and **aborts** if the env
+used the distance fallback (`--allow-distance-grasp` overrides, for diagnostics only).
+
+**Error 2 — V3/V4/V5 were thresholding the gripper's own squeeze.** MuJoCo's soft contact lets the
+pads indent into the peg; measured at nominal: **8.6 mm and ~0.4 kN** against 2.6 mm of penetration
+over *manipulation* contacts. So V4's nominal bar (0.0092 m) sat above the depth the task itself
+produces, and its rate tracked how the gripper closed rather than what the peg did.
+*Fix:* the contact reduction splits families — the **grasp pair (gripper geom vs manipulated object)
+is excluded** from `force`/`penetration`, and both families are still logged
+(`force_pairs_all`, `penetration_all`). V3/V4/V5 now measure the peg against the fixture, which is
+the event they are named for.
+
+**Error 3 — coverage was measured with actors that never manipulate.** The gate's sigmas were
+[0.2, 0.4], where the perturbed expert's success is **0.00**: it flails, never loads a contact (peak
+per-pair force 30-102 N versus the expert's ~1.1 kN), and I read that as "V1/V3/V5 are structurally
+unreachable". Wrong: at the **success boundary** (sigma 0.05 -> success 0.75, 0.10 -> 0.33) the same
+actor reaches **7.3 kN** and **0.114 m** of penetration in a single episode. Failures carry
+information only where success is possible.
+*Fix:* `gates.G1.perturbed_sigmas: [0.05, 0.1]`, with the measured success rates recorded next to
+the list so the choice is auditable.
+
+**Corrected result** (3 axes x 3 scales x 6 episodes x 3 actors, `sensitivity_pilot_rev3.json`):
+`axis_shift` **passes** (0.667); read-back **passes**; and coverage is now
+**V1 0.667, V2 0.5, V3 0.167, V4 0.5, V5 0.0**. This *retracts* the previous iteration's conclusion:
+four of five events are reachable, not two — the earlier "structurally unreachable" claim was an
+artifact of the three errors above. G1 still fails on coverage, now on **V5 alone**.
+
+**Why V5 is the hold-out, and the options.** V5 (jam) needs the largest per-pair manipulation force
+above `jam_force` for 5 *consecutive* steps without progress. `jam_force` is currently derived as the
+nominal *peak* x 1.5 (1694 N), which is a peak bar applied to a sustained condition: the boundary
+actor hits 7.3 kN in impacts, but holding >1694 N for five consecutive steps while stalled is a
+different, much rarer regime. A jam is a *sustained* force, so the principled bar is the force level
+that accompanies legitimate movement (e.g. the nominal 90th percentile of the manipulation force, or
+the peak force observed on steps that *do* make progress) x margin — not the peak of the whole
+distribution. That is a fourth derivation change, so it is proposed here rather than applied
+silently; the alternative is to accept a four-event label set.
+
+**Also verified while auditing** (both negative results, both worth not re-deriving):
+* The expert is **not** stateful across episodes — a shared instance and a fresh instance per episode
+give byte-identical success (0.70) and drift (0.0135) over 10 nominal episodes, so "stale expert
+state" is not a second source of contamination.
+* V3's bar is **not** set by the grasp pair (the largest per-pair force is a peg-aperture contact), so
+excluding the grasp family does not make V3 easier to reach — its 0.167 comes from real over-force.
+
 ### OPEN QUESTIONS (consolidated; append-only, never renumbered)
 9. **S0 provisioning.** `lerobot` 0.6.0 is installed with the `dataset` extra; S0 is blocked by the
    `smolvla_base` *checkpoint revision* (pre-processor-format) and needs a fresh download.
@@ -483,6 +539,12 @@ network; only LeRobot's own eval driver is (OPEN QUESTION 9).
    per-type rates `V2 0.5` / `V2 0.5, V4 0.5` byte-identical, i.e. no measured behaviour changed
    (every existing caller's loop budget already equalled the env's, which is why nothing depended
    on the missing flag).*
+19. **V5's bar is a peak bar applied to a sustained condition.** `jam_force` = nominal peak x 1.5
+   (1694 N) must hold for 5 consecutive non-progressing steps, which is why V5 reads 0.000 while V1-V4
+   are reachable. Proposed (not applied): derive it from the force level that accompanies legitimate
+   progress — the nominal 90th percentile of the manipulation force, or the peak on steps that *do*
+   make progress — x margin. Deciding this is a derivation-rule change, so it needs the same
+   sign-off as the earlier ones.
 16. **V1 and V4 are out-of-envelope detectors, not failure signatures.** V1's quantity is dominated by
    the peg slide that the insertion itself requires (83 mm at nominal), and V4 fires on *softer* than
    nominal contacts (14.8 mm at stiff 0.25, 9.2 mm at 1.0, 4.4 mm at 4.0). If either is kept, every

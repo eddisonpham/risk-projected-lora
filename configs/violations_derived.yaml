@@ -1,16 +1,21 @@
 violations:
-  drop_dist: 0.08992630862969109
+  drop_dist: 0.039047586857173744
   force_max: 1693.9596917141257
   horizon: 10
   jam_force: 1693.9596917141257
   jam_progress_eps: 0.002
   jam_steps: 5
-  penetration: 0.009168747083243476
+  penetration: 0.005153324466708175
   provenance:
-    config_hash: d6d43ae4
+    allow_distance_grasp: false
+    config_hash: a4f255f4
+    contact_family:
+    - manipulation (grasp pair excluded)
     generator: scripts/derive_violation_thresholds.py
     generator_version: 1
-    git_sha: 689e5ef1c430eacb5f3b1b15e50188f0c64a5e6b
+    git_sha: 06cbafd2815a64d82831c9d3da30ba105cf3b752
+    grasp_test:
+    - contact
     learned_checkpoint_in_loop: false
     margin:
       V1: 1.5
@@ -21,14 +26,14 @@ violations:
     n_episodes: 50
     n_steps: 10000
     nominal_peaks:
-      drop_dist: 0.059950872419794056
+      drop_dist: 0.02603172457144916
       force_max: 1129.3064611427505
-      penetration: 0.009168747083243476
-      slip_drift: 0.08260109348145703
+      penetration: 0.005153324466708175
+      slip_drift: 0.01350707401522962
     rule: nominal_max_x_margin
     source: scripted expert, nominal dynamics, nominal cell ONLY
     status: derived
     v4_is_absolute_depth: true
     v4_note: fires on softer-than-nominal contacts; report it with the axis
-  slip_drift: 0.12390164022218554
+  slip_drift: 0.020260611022844432
   window: 10

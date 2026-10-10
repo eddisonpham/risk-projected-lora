@@ -21,7 +21,14 @@ gates:
     # Coverage therefore runs the failure-inducing actor as well; every actor's per-scale
     # rates are reported either way, and the criterion names the actors it used.
     coverage_actors: [expert, perturbed]
-    perturbed_sigmas: [0.2, 0.4] # perturb_chunk's convention; 0.4 is beyond D-crit's grid
+    # Sigmas sit at the *success boundary*, which is where failures carry information.
+    # Measured (perturb_chunk's convention, nominal dynamics, expert chunks): sigma=0.05 ->
+    # success 0.75, 0.10 -> 0.33, 0.20 -> 0.00, 0.40 -> 0.00. The first list used 0.2/0.4,
+    # i.e. two actors that never succeed and (measured) never load the contacts either
+    # (peak per-pair force 30-102 N versus the expert's ~1.1 kN), which made V1/V3/V5 look
+    # structurally unreachable when the boundary actor reaches 7.3 kN and 0.114 m of
+    # penetration in a single episode.
+    perturbed_sigmas: [0.05, 0.1]
   # G2 — VRAM budget. The whole model choice rests on this.
   G2:
     budget_gb: 7.0

@@ -12,8 +12,9 @@ key                          meaning
 ``eef_pos``                  (3,) end-effector position
 ``object_pos``               (3,) manipulated-object position
 ``grasped``                  bool, is the object currently held
-``force``                    float, or an array of per-pair normal forces. Either way
-                             the **maximum** pair is thresholded (see V3): a sum is
+``force``                    float, or an array of per-pair normal forces over
+                             **manipulation** contacts (the grasp pair excluded). The
+                             **maximum** pair is thresholded (see V3): a sum is
 dominated by the stiffest meshing pair and, on a
                              soft-constraint solver, *falls* as stiffness rises
 ``penetration``              float, or array of per-contact ``dist`` values; the
@@ -49,13 +50,20 @@ Event definitions (``04`` §4):
   held object to place it (the toy expert does exactly that, ~25 mm, so the rule
   reported a drop in 12/12 nominal episodes). ``object_height`` remains an
   accepted, optional field of ``step_info`` for provenance.
-* **V3 over-force** — the **largest per-pair** normal contact force above
-  ``spec.force_max``. A summed force is not usable here: at nominal dynamics the sum is
-  ~3.2 kN (four pad/claw-peg pairs) and it *decreases* with ``stiff_scale``, so a summed
-  bar is both unreachable and confounded with the stiffness axis it is supposed to help
-  measure. The per-pair maximum is 356 N at nominal and rises to ~1.0 kN on the mass axis.
-* **V4 penetration** — any task-critical contact depth above
-  ``spec.penetration`` (absolute, so the stiffness axis cannot move the bar).
+* **V3 over-force** — the **largest per-pair manipulation** normal force above
+  ``spec.force_max``. Two exclusions, both measured: a *summed* force (the earlier
+  definition) is dominated by whichever pair is meshing and *decreases* with
+  ``stiff_scale``, so it is unreachable and confounded with the axis it should help
+  measure; and the **grasp pair** (gripper geom vs the manipulated object) is removed
+  entirely, because how hard the gripper squeezes is not a task failure — the pads indent
+  into the peg by 8.6 mm at nominal and carry ~0.4 kN, which set V4's bar *above* the
+  penetration the task itself produces. Over manipulation contacts the nominal peak is
+  0.0026 m of depth and ~1.1 kN of per-pair force.
+* **V4 penetration** — any **manipulation** contact depth above ``spec.penetration``
+  (absolute, so the stiffness axis cannot move the bar). Note the direction: on a
+  soft-constraint solver penetration *falls* as the contact stiffens (measured 14.8 mm at
+  ``stiff_scale`` 0.25 -> 4.4 mm at 4.0 over all contacts), so V4 is an out-of-envelope
+  detector and its rate is anti-correlated with that axis. Report it with the axis.
 * **V5 jam** — the same per-pair maximum above ``spec.jam_force`` for
   ``spec.jam_steps`` consecutive steps while progress moved less than
   ``spec.jam_progress_eps`` (FACT's precision/jam signature).

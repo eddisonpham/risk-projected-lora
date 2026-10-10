@@ -8,6 +8,10 @@ the thing being measured — so this script refuses to run with a learned checkp
 the loop and records what it used in ``provenance``.
 
     python scripts/derive_violation_thresholds.py --config configs/exp/e0_baseline_repro.yaml
+
+The derivation **refuses to run** when the env used the distance grasp fallback, because the
+quantities would then describe something other than what the monitor computes (see the note at the
+call site). It also records the grasp test and the contact family it saw in ``provenance``.
 """
 
 from __future__ import annotations
@@ -48,6 +52,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="permit a learned policy (INVALID for the frozen thresholds; diagnostic only)",
     )
+    parser.add_argument(
+        "--allow-distance-grasp",
+        action="store_true",
+        help="derive even though the env used the distance grasp fallback (NOT valid to freeze)",
+    )
     ns = parser.parse_args(argv)
 
     import numpy as np
@@ -71,6 +80,8 @@ def main(argv: list[str] | None = None) -> int:
     window = int(cfg.violations.window)
     slip, drop, force, pen = [], [], [], []
     jam_force_windows: list[float] = []
+    grasp_tests: set[str] = set()
+    families: set[str] = set()
     for ep in range(ns.episodes):
         # Nominal dynamics, nominal cell: the reference behaviour.
         env = task.make_env(cfg.dynamics.nominal, seed=ep)
@@ -85,6 +96,14 @@ def main(argv: list[str] | None = None) -> int:
         prev_established = False
         for _ in range(max_steps):
             obs, _r, term, trunc, info = env.step(expert.act(obs))
+            # Record the *semantics* this derivation is describing. The first attempt at
+            # these thresholds was derived while the env still fell back to the distance
+            # grasp test (no groups block yet), which made V1's "slip" the arm's approach
+            # motion: a 0.0826 m bar for a quantity that measures 0.0135 m under the
+            # contact test the monitor actually uses. Nothing in the pipeline noticed, so
+            # now the derivation refuses to proceed on a fallback and records what it saw.
+            grasp_tests.add(str(info.get("grasp_test", "unspecified")))
+            families.add(str(info.get("contact_family", "unspecified")))
             force.append(float(info.get("force", 0.0)))
             pen.append(float(info.get("penetration", 0.0)))
             grasped = bool(info.get("grasped"))
@@ -119,6 +138,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if not force:
         raise SystemExit("no steps were collected; the expert never produced a step")
+    if "distance_fallback" in grasp_tests and not ns.allow_distance_grasp:
+        raise SystemExit(
+            "the env fell back to the distance grasp test, so these thresholds would describe "
+            "a different quantity than the monitor computes (V1 slip becomes the arm's approach "
+            "motion and the bar ends up several times too high). Fix configs/env/task_geoms.yaml "
+            "so the grasp groups resolve, or pass --allow-distance-grasp to derive anyway."
+        )
 
     def peak(values: list[float]) -> float:
         return float(np.max(np.asarray(values, dtype=np.float64))) if values else 0.0
@@ -141,6 +167,9 @@ def main(argv: list[str] | None = None) -> int:
             "n_episodes": ns.episodes,
             "n_steps": len(force),
             "rule": RULE,
+            "grasp_test": sorted(grasp_tests),
+            "contact_family": sorted(families),
+            "allow_distance_grasp": bool(ns.allow_distance_grasp),
             "nominal_peaks": {
                 "slip_drift": peak(slip),
                 "drop_dist": peak(drop),

@@ -187,6 +187,41 @@ def test_grasp_is_contact_and_force_is_the_largest_pair(task: MetaWorldTask) -> 
     )
 
 
+def test_thresholded_contacts_exclude_the_grasp_pair(task: MetaWorldTask) -> None:
+    """V3/V4 threshold *manipulation* contacts, so the families must be separable.
+
+    Regression guard for the measurement error behind G1's first freeze: the gripper's own
+    squeeze was inside the penetration reduction, so V4's bar sat above the depth the task
+    itself produces and its rate tracked the gripper, not the task. Measured here as a
+    relation rather than a constant: the all-contact values can only be >= the manipulation
+    ones, and while the peg is held they must be strictly larger at some step, which is the
+    pads indenting into it.
+    """
+    env = task.make_env(DynamicsSpec(), seed=0)
+    expert = task.expert()
+    split_seen = False
+    try:
+        obs, _ = env.reset(seed=0)
+        for _ in range(EXPERT_STEPS):
+            obs, _r, _t, _tr, info = env.step(expert.act(obs))
+            assert info["contact_family"].startswith("manipulation")
+            manip = np.asarray(info["force_pairs"], dtype=np.float64)
+            every = np.asarray(info["force_pairs_all"], dtype=np.float64)
+            assert float(info["force"]) == pytest.approx(manip.max() if manip.size else 0.0)
+            assert float(info["penetration"]) <= float(info["penetration_all"]) + 1e-12
+            if manip.size < every.size and float(info["penetration_all"]) > float(
+                info["penetration"]
+            ):
+                split_seen = True
+    finally:
+        env.close()
+    assert split_seen, (
+        "no step showed the grasp pair carrying more penetration than the manipulation "
+        "contacts; either the gripper/object groups stopped resolving or the family split "
+        "was lost, and V3/V4 would silently go back to thresholding the gripper's squeeze"
+    )
+
+
 def test_contact_read_back_lists_pairs(task: MetaWorldTask) -> None:
     env = task.make_env(DynamicsSpec(), seed=0)
     expert = task.expert()
