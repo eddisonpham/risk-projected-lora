@@ -324,6 +324,13 @@ class DynamicsGateCfg(StrictModel):
     pi_base_success_band: tuple[float, float] = (0.30, 0.90)
     axis_shift_pp: float = 15.0
     min_violation_rate: float = 0.05
+    #: Actors the *coverage* criterion is measured over (``04`` §8). The scripted expert
+    #: alone cannot evoke V1/V3/V5 on peg-insert-side and an expert is meant to be
+    #: failure-free, so coverage also runs the failure-inducing actor. Protocol change,
+    #: approved by the human and logged (``research_log/LOG.md`` iteration 8).
+    coverage_actors: list[str] = ["expert"]
+    #: Sigmas for the perturbed actor, in ``perturb_chunk``'s own convention.
+    perturbed_sigmas: list[float] = [0.2, 0.4]
 
 
 class VramGateCfg(StrictModel):

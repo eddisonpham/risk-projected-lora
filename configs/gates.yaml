@@ -11,6 +11,17 @@ gates:
     pi_base_success_band: [0.30, 0.90] # headroom in both directions
     axis_shift_pp: 15.0 # success or violation shift across the axis range
     min_violation_rate: 0.05 # each of V1-V5 must occur somewhere
+    # WHICH actors the coverage criterion is measured over (04 §8).
+    #
+    # PROTOCOL CHANGE, human-approved 2026-10-09 (logged in research_log/LOG.md,
+    # iteration 8 / OPEN QUESTION 15). Measured: with bars derived from nominal expert
+    # rollouts, the scripted expert evokes only V2 (mu axis) and V4 (stiff axis), and
+    # V1/V3/V5 stay at 0.00 even under sigma=0.4 action noise -- an expert is *supposed*
+    # to be failure-free, so measuring reachability on it alone asks the wrong question.
+    # Coverage therefore runs the failure-inducing actor as well; every actor's per-scale
+    # rates are reported either way, and the criterion names the actors it used.
+    coverage_actors: [expert, perturbed]
+    perturbed_sigmas: [0.2, 0.4] # perturb_chunk's convention; 0.4 is beyond D-crit's grid
   # G2 — VRAM budget. The whole model choice rests on this.
   G2:
     budget_gb: 7.0

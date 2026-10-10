@@ -337,9 +337,49 @@ the five events cannot be evoked at all. `11_roadmap_and_gates.md` says "G1 fail
 read as testing the *wrong actor* (an expert is supposed to be failure-free). Both readings change
 something claim-relevant, so this is escalated rather than decided here (OPEN QUESTION 15).
 
-**Next 1-3 actions.** (1) Decide the fork in OQ 15. (2) G2 (VRAM on the real SmolVLA config) is
-independent of all of the above and is the next hard constraint. (3) The chunk-level prefix/KV
-plumbing for Stage A, which E0 needs regardless of which task survives.
+**Decision and outcome: coverage is measured with a failure-inducing actor.** The human chose
+(2026-10-09, OQ 15) to keep peg-insert-side and evaluate the coverage criterion against the
+failure-inducing actor as well as the expert. Implemented as a *protocol change inside the
+committed gate config* (`gates.G1.coverage_actors: [expert, perturbed]`,
+`perturbed_sigmas: [0.2, 0.4]`), a new library actor (`envs/actors.py:PerturbedExpertActor`)
+that reuses `perturb_chunk`'s sigma convention (noise scaled by the action RMS) and draws one
+deviation per chunk, and a criterion that *names the actors it used*: a configured actor that
+did not run is reported in the detail, never silently dropped.
+
+Measured (3 scales x 8 episodes per actor, `runs/_g1/sensitivity_pilot_perturbed.json`):
+
+* **The actor really does induce failure**: success 0.00-0.25 at sigma 0.2 and 0.00 at 0.4,
+versus the expert's 0.75-0.88 — and its episodes still *manipulate* (105-176 grasped steps of
+200), so it fails at the task rather than flailing outside it.
+* `axis_shift` **passes** (1.000: mu 0.375, mass 0.375, stiff 0.5) and the read-back passes.
+* **Coverage still fails**: V2 0.625, V4 1.000, and **V1/V3/V5 0.000 over all three actors**.
+* **Why V3 is unreachable even for a failing actor.** Perturbed episodes load the contacts
+*less* than the expert: peak per-pair force 30-102 N in a 6-episode probe versus the expert's
+371 N (10 episodes) / 1129 N (50 episodes). Failing to insert by flailing is quieter than
+succeeding by pressing, and nothing on this task pushes a single pair past the nominal
+envelope. V1's quantity is the peg slide the insertion itself requires; V5 needs a sustained
+force that no actor produces. Three of the five labels are therefore structurally unreachable
+here, whatever runs the policy.
+
+**Observation (not acted on).** `MetaWorldDynEnv` advertises `max_episode_steps` but never sets
+`truncated` itself — it forwards the wrapped env's flag, which stayed `False` after a 200-step
+episode. Nothing in the pipeline relies on it (rollout, gen_demos and anti_gaming each carry
+their own counter), but a probe of mine mislabelled stuck episodes as `failure_class="none"`
+because of it. The wrapper should honour its own budget; it is cheap but it changes episode
+lengths, so it belongs in its own change with tests. OPEN QUESTION 17.
+
+**Process note.** The first run of this pilot computed every episode and then died writing the
+payload (`NameError` on an undefined name — 8 minutes of MuJoCo lost). A one-scale smoke run of
+the script is now the first thing to do after touching it; the same smoke immediately caught a
+second bug, where the coverage criterion matched actor names exactly and so silently fell back
+to the expert alone while the perturbed runs sat unread in the same payload.
+
+**Next 1-3 actions.** (1) Given the measurement above, re-open the task-vs-events question with
+this evidence (OQ 15 is now answered for the *actor*, not for the *events*): either reduce the
+label set to what is reachable (V2, V4) plus an event for "finished the budget without
+success", or switch task per `11`. (2) G2 (VRAM on the real SmolVLA config) is independent of
+all of the above and is the next hard constraint. (3) The chunk-level prefix/KV plumbing for
+Stage A, which E0 needs regardless of which task survives.
 
 ### OPEN QUESTIONS (consolidated; append-only, never renumbered)
 9. **S0 provisioning.** `lerobot` 0.6.0 is installed with the `dataset` extra; S0 is blocked by the
@@ -375,12 +415,18 @@ plumbing for Stage A, which E0 needs regardless of which task survives.
    squeeze) and threshold only the manipulation contacts; the pilot could not separate them because
    both are in the task-critical set.*
 15. **Does the coverage criterion mean "reachable by the expert" or "reachable by some policy"?**
-   Measured: with nominal-derived bars, the scripted expert evokes only V2 (mu axis) and V4 (stiff
-   axis); the other three are unreachable even under sigma=0.4 action noise. Three claim-relevant
-   routes, none decidable inside the current protocol: (a) evaluate coverage with a *failure-inducing*
-   actor (the sigma-perturbed chunks that D-crit already uses) and keep peg-insert-side; (b) follow
-   `11` and switch to `assembly-v3` / `hand-insert-v3` / `box-close-v3`; (c) demote V1/V3/V5 to
-   diagnostics and carry a smaller event set. Escalated to the human (CLAUDE.md, "When blocked").
+   *Decided (human, 2026-10-09): route (a) — coverage is measured with the failure-inducing
+   `PerturbedExpertActor` as well as the expert, recorded in `configs/gates.yaml`. Outcome: the
+   perturbed actor induces failure (success 0.00-0.25) yet coverage still fails, with V1/V3/V5 at
+   0.000 over all actors — so the criterion is no longer the open part; the *event set* is. The
+   routes that remain are (b) switch task per `11` and (c) demote V1/V3/V5 and add an event for
+   "budget exhausted without success" (currently `failure_class="none"`), which the perturbed
+   actor produces constantly.*
+17. **`MetaWorldDynEnv.max_episode_steps` is never enforced.** The wrapper computes the budget but
+   forwards the wrapped env's `truncated`, which stays `False` past it, so an env-level
+   "budget exhausted" signal does not exist. No current caller depends on it (they all count for
+   themselves), but it silently mislabels any future consumer. Fix in its own change: it alters
+   episode lengths, so it needs its own before/after comparison.
 16. **V1 and V4 are out-of-envelope detectors, not failure signatures.** V1's quantity is dominated by
    the peg slide that the insertion itself requires (83 mm at nominal), and V4 fires on *softer* than
    nominal contacts (14.8 mm at stiff 0.25, 9.2 mm at 1.0, 4.4 mm at 4.0). If either is kept, every

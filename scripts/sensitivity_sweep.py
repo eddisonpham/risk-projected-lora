@@ -8,6 +8,13 @@ violation rates and the physics read-backs. It then evaluates the four criteria 
 the config, and **fails an unimplemented criterion rather than skipping it**: a
 sweep that cannot evaluate the band criterion for ``pi_base`` has not passed G1.
 
+``gates.G1.coverage_actors`` decides which actors the *coverage* criterion is measured
+over (``04`` §8). The scripted expert alone cannot evoke three of the five events on
+peg-insert-side (``research_log/LOG.md``, iteration 8), and an expert is *supposed* to be
+failure-free, so the criterion is measured over the failure-inducing
+:class:`~riskproj.envs.actors.PerturbedExpertActor` as well. Every actor that runs is
+reported per scale; the criterion names the actor that produced each event's rate.
+
     python scripts/sensitivity_sweep.py --config configs/exp/e0_baseline_repro.yaml
 """
 
@@ -35,6 +42,11 @@ def _scale_spec(axis: str, scale: float) -> Any:
 
 def _episode(task: Any, spec: Any, actor: Any, *, seed: int, max_steps: int) -> dict[str, Any]:
     env = task.make_env(spec, seed=seed)
+    # A stochastic actor must restart its stream per episode, otherwise its result for a
+    # given (axis, scale, episode) depends on how many episodes ran before it.
+    reseed = getattr(actor, "reseed", None)
+    if callable(reseed):
+        reseed(seed)
     obs, _info = env.reset(seed=seed)
     steps = 0
     for _ in range(max_steps):
@@ -162,27 +174,42 @@ def evaluate_g1(cfg: Any, payload: dict[str, Any], *, axes: list[str]) -> dict[s
         }
     )
 
-    seen = {
-        v: max(
-            (
-                float(per["violation_rate"][v])
-                for axis in axes
-                for name in payload["axes"][axis]["by_actor"]
-                for per in payload["axes"][axis]["by_actor"][name]["per_scale"]
-            ),
-            default=float("nan"),
-        )
-        for v in ("V1", "V2", "V3", "V4", "V5")
-    }
-    occ_ok = all(np.isfinite(r) and r >= float(gate.min_violation_rate) for r in seen.values())
-    criteria.append(
-        {
-            "name": "violation_coverage",
-            "passed": bool(occ_ok),
-            "detail": f"per-type max rates { {k: round(v, 3) for k, v in seen.items()} } "
-            f"(each must reach {gate.min_violation_rate})",
+    coverage_actors = list(getattr(gate, "coverage_actors", None) or ["expert"])
+
+    def _rates_for(names: list[str]) -> dict[str, float]:
+        return {
+            v: max(
+                (
+                    float(per["violation_rate"][v])
+                    for axis in axes
+                    for name in names
+                    if name in payload["axes"][axis]["by_actor"]
+                    for per in payload["axes"][axis]["by_actor"][name]["per_scale"]
+                ),
+                default=float("nan"),
+            )
+            for v in ("V1", "V2", "V3", "V4", "V5")
         }
+
+    # A configured actor may stand for a family: ``perturbed`` runs as ``perturbed@0.2``,
+    # ``perturbed@0.4``, ... Matching only exact names made the criterion silently fall back
+    # to the expert alone while the perturbed runs sat unread in the same payload.
+    def _ran(name: str) -> bool:
+        return any(a == name or a.startswith(f"{name}@") for a in payload.get("actors", []))
+
+    present = [a for a in payload.get("actors", []) if any(a.split("@")[0] == n for n in coverage_actors)]
+    unknown = [n for n in coverage_actors if not _ran(n)]
+    seen = _rates_for(present or list(payload.get("actors", [])))
+    occ_ok = all(np.isfinite(r) and r >= float(gate.min_violation_rate) for r in seen.values())
+    detail = (
+        f"per-type max rates { {k: round(v, 3) for k, v in seen.items()} } "
+        f"(each must reach {gate.min_violation_rate}) over actors {present}"
     )
+    if unknown:
+        # A configured actor that never ran must not look like a clean result: the
+        # criterion is then evaluated over the actors that did run, and says so.
+        detail += f"; configured actors that did not run: {unknown}"
+    criteria.append({"name": "violation_coverage", "passed": bool(occ_ok), "detail": detail})
 
     rb_ok = True
     rb_notes: list[str] = []
@@ -219,6 +246,45 @@ def evaluate_g1(cfg: Any, payload: dict[str, Any], *, axes: list[str]) -> dict[s
     }
 
 
+def _coverage_actors(task: Any, cfg: Any, gate: Any) -> dict[str, Any]:
+    """Actors named by ``gates.G1.coverage_actors`` beyond the expert (``04`` §8)."""
+    from riskproj.envs.actors import PerturbedExpertActor
+
+    wanted = [str(a) for a in (getattr(gate, "coverage_actors", None) or ["expert"])]
+    out: dict[str, Any] = {}
+    if not any(a.startswith("perturbed") for a in wanted):
+        return out
+    sigmas = [float(s) for s in (getattr(gate, "perturbed_sigmas", None) or [0.2])]
+    low, high = _action_bounds(task, cfg)
+    horizon = int(getattr(cfg.env, "exec_horizon", 10) or 10)
+    for sigma in sigmas:
+        name = f"perturbed@{sigma:g}"
+        # ``perturbed`` without a sigma means "every sigma in the gate's list".
+        if name not in wanted and "perturbed" not in wanted:
+            continue
+        out[name] = PerturbedExpertActor(
+            expert=task.expert(),
+            sigma=sigma,
+            horizon=horizon,
+            seed=int(cfg.seed),
+            action_low=low,
+            action_high=high,
+        )
+    return out
+
+
+def _action_bounds(task: Any, cfg: Any) -> tuple[Any, Any]:
+    """The env's action box, read from the live model rather than assumed."""
+    env = task.make_env(cfg.dynamics.nominal, seed=0)
+    try:
+        space = getattr(env.unwrapped, "action_space", None)
+        low = getattr(space, "low", None)
+        high = getattr(space, "high", None)
+        return low, high
+    finally:
+        env.close()
+
+
 def _closest_scale(per_scale: list[dict[str, Any]], target: float) -> dict[str, Any] | None:
     if not per_scale:
         return None
@@ -250,6 +316,8 @@ def main(argv: list[str] | None = None) -> int:
     axes = list(AXES) if ns.axis == "all" else [ns.axis]
 
     actors: dict[str, Any] = {"expert": task.expert()}
+    for name, actor in _coverage_actors(task, cfg, gate).items():
+        actors[name] = actor
     if ns.include_policy:
         try:
             from riskproj.policies import build_policy, is_available
@@ -281,11 +349,14 @@ def main(argv: list[str] | None = None) -> int:
             base_seed=int(cfg.seed),
         )
 
+    coverage_actors = [str(a) for a in (getattr(gate, "coverage_actors", None) or ["expert"])]
     payload = {
         "config": str(ns.config),
         "config_hash": cfg.config_hash(),
         "task": str(cfg.env.task),
         "actors": sorted(actors),
+        "coverage_actors": coverage_actors,
+        "perturbed_sigmas": [float(s) for s in (getattr(gate, "perturbed_sigmas", None) or [])],
         "episodes_per_scale": episodes,
         "n_scales": n_scales,
         "axes": axes_payload,
