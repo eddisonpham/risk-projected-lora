@@ -456,10 +456,16 @@ network; only LeRobot's own eval driver is (OPEN QUESTION 9).
    routes that remain are (b) switch task per `11` and (c) demote V1/V3/V5 and add an event for
    "budget exhausted without success" (currently `failure_class="none"`), which the perturbed
    actor produces constantly.*
-18. **G2 needs the eval layer's observation batch in the profiler.** The critic phase is measured
-   (0.031 GB); `train` and `inference` are unevaluated because the profiler can only synth the toy's
-   batch. The real batch (two 128x128 camera images + state + language tokens for the SmolVLA
-   processor) exists in the eval path and must be reused rather than re-invented.
+18. **G2 needs the real policy's observation batch — and that batch may not exist yet.** The critic
+   phase is measured (0.031 GB); `train` and `inference` are unevaluated because the profiler can
+   only synth the toy's batch. Following it up found the reason it is not a one-line wiring job:
+   `eval/rollout.py` builds the policy batch as `{"state": state_t.reshape(1, -1)}` and nothing else,
+   which is complete for the toy and is *not* obviously complete for SmolVLA (two 128x128 cameras +
+   language). The real adapter's forward path has therefore never been exercised by the eval layer —
+   every test that would run it is behind `RISKPROJ_TEST_REAL_POLICIES=1` and S0/S3 do not drive it.
+   Two things must be settled together, before either G2's train phase or P2's Stage A can be
+   trusted: what the adapter's forward requires from a batch, and where that batch is built (the
+   adapter itself, from `obs`, or the eval layer). Recorded rather than patched with a guess.
 17. **`MetaWorldDynEnv.max_episode_steps` is never enforced.** The wrapper computes the budget but
    forwards the wrapped env's `truncated`, which stays `False` past it, so an env-level
    "budget exhausted" signal does not exist. No current caller depends on it (they all count for
