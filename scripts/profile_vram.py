@@ -61,6 +61,27 @@ def _to_device(batch: dict[str, Any], device: Any) -> dict[str, Any]:
     return {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
 
 
+def _profiler_batch(policy: Any, *, batch_size: int, device: Any) -> dict[str, Any]:
+    """A batch the *adapter* can consume, or a loud failure naming what is missing.
+
+    The toy adapter can build its own batch (``sample_batch``). A real adapter cannot: its
+    batch *is* the task's observation — two camera images, the proprioceptive state and the
+    language tokens for the SmolVLA checkpoint — and only the eval layer, driving a live
+    env, produces it (``05`` §6). Fabricating one here (an 8x8 stand-in image, a guessed
+    token count) would report a VRAM number for a workload that never runs, so this raises
+    instead. Wire the eval layer's batch path in before trusting a real-model number.
+    """
+    sample = getattr(policy, "sample_batch", None)
+    if not callable(sample):
+        raise RuntimeError(
+            f"{type(policy).__name__} cannot build a profiling batch: G2 on the real model "
+            "needs the task's own observation batch (images + state + language tokens), which "
+            "only the eval layer builds from a live env. Add that path here rather than "
+            "fabricating a batch - a wrong image size or token count measures nothing."
+        )
+    return _to_device(sample(batch_size=batch_size, seed=0), device)
+
+
 def phase_critic(cfg: Any, *, batch_size: int) -> dict[str, int]:
     """Critic training with cached features: never loads the VLM (that is the point)."""
     import torch
@@ -125,22 +146,17 @@ def phase_train(cfg: Any, *, batch_size: int, projection: bool) -> dict[str, Any
 
     from riskproj.critic.features import FeatureSpec
     from riskproj.critic.model import RiskCritic, make_risk_fn
-    from riskproj.policies import build_policy
+    from riskproj.policies import build_policy_for_env
     from riskproj.projection import project
     from riskproj.utils.profiling import measure_peak_vram
 
     device = _device()
     state_dim = int(cfg.env.state_dim or 12)
-    policy = build_policy(
-        cfg.model,
-        state_dim=state_dim,
-        action_dim=int(cfg.env.action_dim),
-        chunk_horizon=int(cfg.env.exec_horizon),
-        hidden=64,
-        num_flow_steps=int(cfg.model.num_flow_steps),
-        seed=0,
-        device=str(device),
-    )
+    # ``build_policy_for_env`` and not a hand-built kwarg list: the env owns the geometry,
+    # and passing the toy's own parameters (``hidden``, ``num_flow_steps``, the *execution*
+    # horizon) made the real adapter unconstructible - so this phase silently measured the
+    # toy only.
+    policy = build_policy_for_env(cfg, device=str(device))
     policy.attach_lora(cfg.model.lora)
     policy.to(device)
     params = list(policy.trainable_parameters())
@@ -159,7 +175,7 @@ def phase_train(cfg: Any, *, batch_size: int, projection: bool) -> dict[str, Any
 
     # A flow head needs a flow state (x_tau/tau) as well as ``state``; the policy owns
     # the only constructor that guarantees a mutually consistent batch.
-    batch = _to_device(policy.sample_batch(batch_size=batch_size, seed=0), device)
+    batch = _profiler_batch(policy, batch_size=batch_size, device=device)
     with measure_peak_vram() as measured:
         for _ in range(3):
             out = policy.forward(batch, site=cfg.model.site.default)
@@ -195,22 +211,13 @@ def phase_inference(cfg: Any, *, batch_size: int, projection: bool) -> dict[str,
 
     from riskproj.critic.features import FeatureSpec
     from riskproj.critic.model import RiskCritic, make_risk_fn
-    from riskproj.policies import build_policy
+    from riskproj.policies import build_policy_for_env
     from riskproj.projection import project
     from riskproj.utils.profiling import measure_peak_vram
 
     device = _device()
     state_dim = int(cfg.env.state_dim or 12)
-    policy = build_policy(
-        cfg.model,
-        state_dim=state_dim,
-        action_dim=int(cfg.env.action_dim),
-        chunk_horizon=int(cfg.env.exec_horizon),
-        hidden=64,
-        num_flow_steps=int(cfg.model.num_flow_steps),
-        seed=0,
-        device=str(device),
-    ).to(device).eval()
+    policy = build_policy_for_env(cfg, device=str(device)).to(device).eval()
     spec = FeatureSpec(
         state_dim=state_dim,
         action_dim=int(cfg.env.action_dim),
@@ -218,9 +225,9 @@ def phase_inference(cfg: Any, *, batch_size: int, projection: bool) -> dict[str,
         hist_len=max(1, int(cfg.critic.use_history)),
     )
     critic = RiskCritic(cfg.critic, spec).to(device).eval()
-    # A flow head needs x_tau/tau as well as state; ``sample_batch`` is the policy's own
-    # constructor for a mutually consistent batch.
-    batch = _to_device(policy.sample_batch(batch_size=batch_size, seed=0), device)
+    # A flow head needs x_tau/tau as well as state; the policy's own batch constructor
+    # guarantees a mutually consistent batch (or fails loudly, see ``_profiler_batch``).
+    batch = _profiler_batch(policy, batch_size=batch_size, device=device)
     flow_ctx = policy.make_context(dict(batch), site=cfg.model.site.default)
     with measure_peak_vram() as measured:
         with torch.no_grad():
@@ -252,12 +259,24 @@ def main(argv: list[str] | None = None) -> int:
     budget = _budget_gb(cfg)
     phases: dict[str, dict[str, Any]] = {}
 
-    if ns.phase in ("critic", "all"):
-        phases["critic"] = phase_critic(cfg, batch_size=ns.batch_size)
-    if ns.phase in ("train", "all"):
-        phases["train"] = phase_train(cfg, batch_size=ns.batch_size, projection=True)
-    if ns.phase in ("inference", "all"):
-        phases["inference"] = phase_inference(cfg, batch_size=ns.batch_size, projection=True)
+    # A phase that cannot run is recorded as *unevaluated*, not dropped: G2 asks whether
+    # all three fit, so a missing phase is a non-pass and has to be visible in the
+    # artifact. Only the phases that were asked for are attempted.
+    requested = (
+        ["critic", "train", "inference"] if ns.phase == "all" else [str(ns.phase)]
+    )
+    runners = {
+        "critic": lambda: phase_critic(cfg, batch_size=ns.batch_size),
+        "train": lambda: phase_train(cfg, batch_size=ns.batch_size, projection=True),
+        "inference": lambda: phase_inference(cfg, batch_size=ns.batch_size, projection=True),
+    }
+    unevaluated: dict[str, str] = {}
+    for name in requested:
+        try:
+            phases[name] = runners[name]()
+        except Exception as exc:  # recorded, then reported as a failure below
+            unevaluated[name] = f"{type(exc).__name__}: {exc}"
+            print(f"[profile-vram] phase {name!r} could not be measured: {unevaluated[name]}", file=sys.stderr)
 
     for name, payload in phases.items():
         peak_gb = float(payload["peak_mb"]) / 1024.0
@@ -275,6 +294,7 @@ def main(argv: list[str] | None = None) -> int:
         "batch_size": ns.batch_size,
         "phases": phases,
         "peak_mb": {k: v["peak_mb"] for k, v in phases.items()},
+        "unevaluated": unevaluated,
         "over_budget": [k for k, v in phases.items() if v["over_budget"]],
         "note": (
             ""
@@ -303,6 +323,13 @@ def main(argv: list[str] | None = None) -> int:
             "not report this as a pass."
         )
 
+    if unevaluated:
+        print(
+            f"[profile-vram] G2 NOT EVALUATED: {sorted(unevaluated)} could not be measured "
+            f"({out}). A phase that never ran is not a phase that fits.",
+            file=sys.stderr,
+        )
+        return 1
     if report["over_budget"] and cuda_available():
         print(
             f"[profile-vram] G2 FAILED: {report['over_budget']} over {budget} GB. Reduce per "

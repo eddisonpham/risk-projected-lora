@@ -43,11 +43,18 @@ def build_policy_for_env(cfg: Any, **overrides: Any) -> PolicyAdapter:
 
     ``overrides`` are for callers that know better (a test with a synthetic policy);
     they replace the env-derived value rather than adding to it.
+
+    Only ``state_dim`` and ``action_dim`` are passed: those are the env geometry *every*
+    adapter must accept. The chunk length is deliberately **not** env geometry — the env's
+    ``exec_horizon`` is how many of a chunk's actions are executed before re-planning,
+    while a chunk's length belongs to the action head (SmolVLA emits 50, the toy 10) and
+    each adapter already derives it from ``cfg.model.chunk_size``. Passing the execution
+    horizon made ``SmolVLAAdapter`` unconstructible (it has no such parameter), which would
+    have failed every real experiment at policy build.
     """
     kwargs: dict[str, Any] = {
         "state_dim": int(cfg.env.state_dim or 12),
         "action_dim": int(cfg.env.action_dim),
-        "chunk_horizon": int(cfg.env.exec_horizon),
     }
     kwargs.update(overrides)
     return build_policy(cfg.model, **kwargs)

@@ -93,6 +93,43 @@ def _toy(*, head: str = "flow_matching", seed: int = 0) -> ToyPolicy:
 # --------------------------------------------------------------------------
 
 
+def test_build_policy_for_env_passes_env_geometry_to_the_toy_adapter() -> None:
+    """``build_policy_for_env`` must work for the toy (the CI path)."""
+    from riskproj.policies import build_policy_for_env
+    from riskproj.utils.config import load_config
+
+    cfg = load_config("configs/exp/toy_smoke.yaml")
+    policy = build_policy_for_env(cfg)
+    assert policy.action_dim == int(cfg.env.action_dim)
+    assert policy.state_dim == int(cfg.env.state_dim or 12)
+    # The chunk length belongs to the action head, not to the env's execution horizon.
+    assert policy.chunk_horizon == int(cfg.model.chunk_size)
+
+
+def test_build_policy_for_env_does_not_pass_the_execution_horizon() -> None:
+    """Regression: env geometry is ``state_dim``/``action_dim``, and nothing else.
+
+    ``SmolVLAAdapter`` has no ``chunk_horizon`` parameter — a chunk is 50 actions while the
+    env executes 10 before re-planning — so passing ``env.exec_horizon`` as a constructor
+    keyword made the real adapter unconstructible, which would have failed every real
+    experiment (and ``profile_vram``'s train/inference phases) at policy build.
+    """
+    from riskproj.policies import build_policy_for_env
+    from riskproj.policies.smolvla import SmolVLAAdapter
+    from riskproj.utils.config import load_config
+
+    if not SmolVLAAdapter.is_available():
+        pytest.skip("install the VLA stack to run this")
+    cfg = load_config("configs/exp/e0_baseline_repro.yaml")
+    # ``load=False`` keeps this a construction test: no checkpoint, no GPU, no network.
+    policy = build_policy_for_env(cfg, load=False, device="cpu")
+    assert policy.action_dim == int(cfg.env.action_dim)
+    assert policy.chunk_horizon == int(cfg.model.chunk_size)
+    assert policy.chunk_horizon != int(cfg.env.exec_horizon), (
+        "the chunk length is model geometry; the execution horizon is not the same number"
+    )
+
+
 def test_zero_lora_equals_base_policy() -> None:
     """LoRA must be an exact identity at attach time (``B`` is zero-initialised)."""
     policy = _toy()

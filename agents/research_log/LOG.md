@@ -381,6 +381,40 @@ success", or switch task per `11`. (2) G2 (VRAM on the real SmolVLA config) is i
 all of the above and is the next hard constraint. (3) The chunk-level prefix/KV plumbing for
 Stage A, which E0 needs regardless of which task survives.
 
+## Iteration 9 — G2 attempted on the real model; the blocker was a construction bug
+
+**What happened.** `scripts/profile_vram.py --config configs/exp/e0_baseline_repro.yaml` did not
+measure anything: it died with `SmolVLAAdapter.__init__() got an unexpected keyword argument
+'chunk_horizon'`. The script passed a kwarg set built for the toy adapter (`chunk_horizon`,
+`hidden`, `num_flow_steps`), and `build_policy_for_env` — the helper `run_experiment.py` uses for
+every real experiment — passed `chunk_horizon=env.exec_horizon` too, so **the real policy could not
+be constructed at all**: E0-E5 would have failed at policy build, and the profiler had only ever
+measured the toy (17.4-17.8 MB, which says nothing about G2).
+
+**Why it is a real bug and not a signature quibble.** The chunk length is not env geometry. The
+env's `exec_horizon` (10) is how many of a chunk's actions are executed before re-planning; the
+chunk belongs to the action head — SmolVLA emits 50, the toy 10 — and both adapters already derive
+it from `cfg.model.chunk_size`. Passing the execution horizon was a category error that the type
+system could not catch because every adapter takes `**kwargs`.
+
+**Fixed and pinned.** `build_policy_for_env` now passes only `state_dim`/`action_dim` (the geometry
+every adapter must accept), the profiler builds through it, and two CPU-safe contract tests
+construct the *real* adapter with `load=False` and check its geometry against the config — the
+regression guard that was missing (the existing real-adapter tests were gated behind
+`RISKPROJ_TEST_REAL_POLICIES=1` and the smoke suite only ever built the toy).
+
+**G2 status: NOT evaluated.** With the fix, the profiler loads the real checkpoint on the GPU and
+measures the **critic** phase at **31.9 MB (0.031 GB, batch 4, budget 7 GB)**. `train` and
+`inference` are recorded as `unevaluated` with the reason and the run exits 1: a real adapter cannot
+synthesise its own batch — the batch *is* the task observation (two 128x128 cameras + state +
+language tokens) — and fabricating an 8x8 stand-in would report a VRAM number for a workload that
+never runs. Next step for G2 is to wire the eval layer's observation batch into the profiler
+(`runs/_g2/vram_real.json` records both the number and the gap).
+
+**Useful side-finding.** The real SmolVLA checkpoint **loads offline from the local cache** (489/489
+weights, all 16 VLM layers) while the Hub is unreachable — so P2/Stage A are not blocked by the
+network; only LeRobot's own eval driver is (OPEN QUESTION 9).
+
 ### OPEN QUESTIONS (consolidated; append-only, never renumbered)
 9. **S0 provisioning.** `lerobot` 0.6.0 is installed with the `dataset` extra; S0 is blocked by the
    `smolvla_base` *checkpoint revision* (pre-processor-format) and needs a fresh download.
@@ -422,6 +456,10 @@ Stage A, which E0 needs regardless of which task survives.
    routes that remain are (b) switch task per `11` and (c) demote V1/V3/V5 and add an event for
    "budget exhausted without success" (currently `failure_class="none"`), which the perturbed
    actor produces constantly.*
+18. **G2 needs the eval layer's observation batch in the profiler.** The critic phase is measured
+   (0.031 GB); `train` and `inference` are unevaluated because the profiler can only synth the toy's
+   batch. The real batch (two 128x128 camera images + state + language tokens for the SmolVLA
+   processor) exists in the eval path and must be reused rather than re-invented.
 17. **`MetaWorldDynEnv.max_episode_steps` is never enforced.** The wrapper computes the budget but
    forwards the wrapped env's `truncated`, which stays `False` past it, so an env-level
    "budget exhausted" signal does not exist. No current caller depends on it (they all count for
