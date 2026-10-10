@@ -466,6 +466,12 @@ network; only LeRobot's own eval driver is (OPEN QUESTION 9).
    Two things must be settled together, before either G2's train phase or P2's Stage A can be
    trusted: what the adapter's forward requires from a batch, and where that batch is built (the
    adapter itself, from `obs`, or the eval layer). Recorded rather than patched with a guess.
+   *Follow-up that reframes this:* the batch's *content* is defined by the checkpoint's
+   preprocessing spec — `policy_preprocessor.json`, which is exactly the file missing from the one
+   cached `smolvla_base` revision and unreachable while the Hub refuses connections (OPEN QUESTION
+   9). So this is not a free design choice: G2's train phase and P2's Stage A both wait on either a
+   reachable newer revision or a deliberate decision to reimplement the observation normalisation
+   from the paper. Same blocker, three symptoms — recorded as one thing to unblock, not three.
 17. **`MetaWorldDynEnv.max_episode_steps` is never enforced.** The wrapper computes the budget but
    forwards the wrapped env's `truncated`, which stays `False` past it, so an env-level
    "budget exhausted" signal does not exist. No current caller depends on it (they all count for
